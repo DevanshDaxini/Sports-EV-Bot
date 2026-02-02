@@ -8,37 +8,70 @@ class FanDuelClient:
         self.api_key = ODDS_API_KEY
         self.base_url = "https://api.the-odds-api.com/v4/sports"
 
-    def get_all_odds(self):
+    def get_all_odds(self, limit_games=3):
         """
-        Loops through every sport in SPORT_MAP, fetches odds, and combines them.
+        1. Loops through sports in SPORT_MAP.
+        2. Fetches Game IDs.
+        3. Loops through the first 'limit_games' to get player props.
         """
         all_data = []
 
-        # Loop through our supported sports (NBA, NHL, NFL...)
         for league_name, sport_key in SPORT_MAP.items():
-            print(f"Fetching FanDuel odds for: {league_name} ({sport_key})...")
+            print(f"\n--- Scanning {league_name} ({sport_key}) ---")
             
-            # Fetch data for this specific sport
-            sport_data = self._fetch_sport_odds(sport_key)
-            all_data.extend(sport_data)
+            # STEP 1: Get the Game IDs (Cheap Call)
+            # We use 'h2h' just to see the schedule
+            games_url = f"{self.base_url}/{sport_key}/odds"
+            params = {
+                'apiKey': self.api_key,
+                'regions': REGIONS,
+                'markets': 'h2h', 
+                'oddsFormat': ODDS_FORMAT,
+                'bookmakers': 'fanduel'
+            }
+
+            try:
+                response = requests.get(games_url, params=params)
+                response.raise_for_status()
+                games = response.json()
+            except Exception as e:
+                print(f"Error fetching schedule for {league_name}: {e}")
+                continue
+
+            print(f"Found {len(games)} games active.")
             
-            # Sleep briefly to be nice to the API
-            time.sleep(0.5)
+            # STEP 2: Loop through specific games to get Props (Expensive Call)
+            # We limit to the first few games to save your quota
+            games_to_check = games[:limit_games]
+
+            for game in games_to_check:
+                game_id = game['id']
+                home_team = game['home_team']
+                away_team = game['away_team']
+                print(f"  > Fetching props for: {away_team} vs {home_team}...")
+
+                # Fetch props for this specific game
+                props = self._fetch_props_for_game(sport_key, game_id)
+                all_data.extend(props)
+                
+                # Sleep to be nice to the API
+                time.sleep(0.5)
 
         return pd.DataFrame(all_data)
 
-    def _fetch_sport_odds(self, sport_key):
+    def _fetch_props_for_game(self, sport_key, game_id):
         """
-        Private helper: Calls the API for ONE specific sport.
+        Fetches specific player props for ONE game ID.
         """
-        url = f"{self.base_url}/{sport_key}/odds"
+        # CORRECT ENDPOINT: /events/{id}/odds
+        url = f"{self.base_url}/{sport_key}/events/{game_id}/odds"
         
         params = {
             'apiKey': self.api_key,
             'regions': REGIONS,
-            'markets': MARKETS,
+            'markets': MARKETS, 
             'oddsFormat': ODDS_FORMAT,
-            'bookmakers': 'fanduel' # Strict filter
+            'bookmakers': 'fanduel'
         }
 
         try:
@@ -46,46 +79,42 @@ class FanDuelClient:
             response.raise_for_status()
             data = response.json()
         except Exception as e:
-            print(f"Error fetching {sport_key}: {e}")
+            print(f"    Error on game {game_id}: {e}")
             return []
 
         clean_odds = []
-
+        
         # --- YOUR HOMEWORK STARTS HERE ---
-        # The JSON structure is nested 4 layers deep:
-        # Games (List) -> Bookmakers (List) -> Markets (List) -> Outcomes (List)
-
-        for game in data:
-            game_date = game.get('commence_time')
-            
-            # Loop through bookmakers (should only be FanDuel because we filtered)
-            for bookmaker in game['bookmakers']:
+        # The JSON structure is:
+        # data (Dict) -> bookmakers (List) -> markets (List) -> outcomes (List)
+        
+        # Note: 'data' is a Dictionary here, not a list of games!
+        bookmakers = data.get('bookmakers', [])
+        
+        for book in bookmakers:
+            # Loop through markets (Points, Rebounds, etc.)
+            for market in book['markets']:
+                stat_type = market['key']
+                outcomes = market['outcomes']
                 
-                # Loop through markets (Points, Rebounds, Pass TDs...)
-                for market in bookmaker['markets']:
-                    stat_type = market['key'] # e.g. "player_points"
-                    
-                    # The Outcomes are a list:
-                    # [ {'name': 'Over', 'point': 20.5, 'price': -110}, 
-                    #   {'name': 'Under', 'point': 20.5, 'price': -110} ]
-                    outcomes = market['outcomes']
-                    
-                    # TODO: Group these outcomes by Player Name + Line
-                    # You need to turn those 2 separate items into 1 dictionary:
-                    # { 'player': 'LeBron', 'line': 20.5, 'over': -110, 'under': -110 }
-                    
-                    pass # <--- Delete this and write your logic
+                # TODO: Group these outcomes by Player Name
+                # 1. Create a temporary dictionary to hold players
+                # 2. Loop through 'outcomes'
+                # 3. If 'Over', save the price. If 'Under', save the price.
+                # 4. Combine them into one clean row.
+                
+                pass # <--- Delete this and write your logic
 
         return clean_odds
 
 # --- TEST BLOCK ---
 if __name__ == "__main__":
     client = FanDuelClient()
-    df = client.get_all_odds()
+    # Checks NBA, limited to first 3 games
+    df = client.get_all_odds(limit_games=3)
     
     if not df.empty:
-        print(f"\nSuccess! Found {len(df)} lines.")
+        print(f"\nSuccess! Gathered {len(df)} player props.")
         print(df.head())
-        print(df['stat'].unique()) # Check what stats we found
     else:
-        print("DataFrame is empty. Did you write the parsing logic?")
+        print("\nNo props found (or maybe no games are scheduled today).")
