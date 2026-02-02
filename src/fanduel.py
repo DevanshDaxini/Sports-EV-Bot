@@ -1,93 +1,91 @@
 import requests
 import pandas as pd
-from src.config import ODDS_API_KEY, SPORT, REGIONS, MARKETS, ODDS_FORMAT
+import time
+from src.config import ODDS_API_KEY, MARKETS, REGIONS, ODDS_FORMAT, SPORT_MAP
 
 class FanDuelClient:
     def __init__(self):
         self.api_key = ODDS_API_KEY
-        # The base endpoint for fetching odds
-        self.url = f'https://api.the-odds-api.com/v4/sports/{SPORT}/odds'
+        self.base_url = "https://api.the-odds-api.com/v4/sports"
 
-    def get_odds(self):
+    def get_all_odds(self):
         """
-        Fetches odds from The Odds API, 
-        filters for FanDuel, and parses the response.
-        Returns a DataFrame with columns: 
-        [player, market, line, over_price, under_price]
+        Loops through every sport in SPORT_MAP, fetches odds, and combines them.
         """
-        # 1. Setup Parameters
+        all_data = []
+
+        # Loop through our supported sports (NBA, NHL, NFL...)
+        for league_name, sport_key in SPORT_MAP.items():
+            print(f"Fetching FanDuel odds for: {league_name} ({sport_key})...")
+            
+            # Fetch data for this specific sport
+            sport_data = self._fetch_sport_odds(sport_key)
+            all_data.extend(sport_data)
+            
+            # Sleep briefly to be nice to the API
+            time.sleep(0.5)
+
+        return pd.DataFrame(all_data)
+
+    def _fetch_sport_odds(self, sport_key):
+        """
+        Private helper: Calls the API for ONE specific sport.
+        """
+        url = f"{self.base_url}/{sport_key}/odds"
+        
         params = {
             'apiKey': self.api_key,
             'regions': REGIONS,
-            'markets': MARKETS, # e.g. 'player_points'
+            'markets': MARKETS,
             'oddsFormat': ODDS_FORMAT,
-            'bookmakers': 'fanduel' # STRICTLY filter for FanDuel
+            'bookmakers': 'fanduel' # Strict filter
         }
 
-        # 2. Make Request
         try:
-            response = requests.get(self.url, params=params)
+            response = requests.get(url, params=params)
             response.raise_for_status()
             data = response.json()
         except Exception as e:
-            print(f"Error fetching FanDuel odds: {e}")
-            return pd.DataFrame()
+            print(f"Error fetching {sport_key}: {e}")
+            return []
 
-        clean_data = []
+        clean_odds = []
 
         # --- YOUR HOMEWORK STARTS HERE ---
         # The JSON structure is nested 4 layers deep:
-        # Games (List) -> Bookmakers (List) -> 
-        # Markets (List) -> Outcomes (List)
-        
-        # 1. Loop through each Game in 'data'
+        # Games (List) -> Bookmakers (List) -> Markets (List) -> Outcomes (List)
+
         for game in data:
-            # 2. Loop through 'bookmakers' inside the game
-            # (Note: Since we filtered for 'fanduel' in params, 
-            # this list should only have 1 item)
+            game_date = game.get('commence_time')
+            
+            # Loop through bookmakers (should only be FanDuel because we filtered)
             for bookmaker in game['bookmakers']:
                 
-                # 3. Loop through 'markets' 
-                # (e.g., player_points, player_rebounds)
+                # Loop through markets (Points, Rebounds, Pass TDs...)
                 for market in bookmaker['markets']:
-                    market_key = market['key'] # e.g., 'player_points'
+                    stat_type = market['key'] # e.g. "player_points"
                     
-                    # 4. Loop through 'outcomes' 
-                    # (The actual players and lines)
-                    # The Odds API groups them differently 
-                    # than you might expect.
-                    # Usually, you get a list like: 
-                    # {desc: 'LeBron', name: 'Over', point: 24.5}, 
-                    # {desc: 'LeBron', name: 'Under', point: 24.5}
-                    
-                    # You need to group these pairs together so 
-                    # you have ONE row per player.
-                    # Hint: Use a temporary dictionary to store 
-                    # the 'Over' while you wait for the 'Under'.
-                    
+                    # The Outcomes are a list:
+                    # [ {'name': 'Over', 'point': 20.5, 'price': -110}, 
+                    #   {'name': 'Under', 'point': 20.5, 'price': -110} ]
                     outcomes = market['outcomes']
                     
-                    # TODO: Write logic to iterate through 'outcomes'
-                    # TODO: Match the Over outcome with the Under 
-                    # outcome for the same player & line.
-                    # TODO: Append a dictionary to 'clean_data' looking like:
-                    # {
-                    #   'player': 'LeBron James',
-                    #   'market': market_key,
-                    #   'line': 24.5,
-                    #   'over_price': -115,
-                    #   'under_price': -105
-                    # }
-                    pass 
+                    # TODO: Group these outcomes by Player Name + Line
+                    # You need to turn those 2 separate items into 1 dictionary:
+                    # { 'player': 'LeBron', 'line': 20.5, 'over': -110, 'under': -110 }
+                    
+                    pass # <--- Delete this and write your logic
 
-        return pd.DataFrame(clean_data)
+        return clean_odds
 
+# --- TEST BLOCK ---
 if __name__ == "__main__":
     client = FanDuelClient()
-    df = client.get_odds()
+    df = client.get_all_odds()
     
     if not df.empty:
-        print(f"Success! Found {len(df)} lines.")
+        print(f"\nSuccess! Found {len(df)} lines.")
         print(df.head())
+        print(df['stat'].unique()) # Check what stats we found
     else:
         print("DataFrame is empty. Did you write the parsing logic?")
