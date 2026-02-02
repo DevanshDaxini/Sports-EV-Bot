@@ -5,7 +5,7 @@ import json
 class PrizePicksClient:
     def __init__(self):
         self.url = "https://api.prizepicks.com/projections"
-        # We need a stronger disguise to bypass the 403 error
+        # Bypassing the 403 error
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
@@ -26,20 +26,25 @@ class PrizePicksClient:
         projections_list = data['data']
         included_list = data['included']
         
-        # STEP 1: Create a "Lookup Dictionary" for Player Names
+        # Finding the player and league name
         player_map = {}
+        league_map = {}
         
         for item in included_list:
-            # FIX 1: Added underscore ('new_player')
             if item['type'] == 'new_player':
                 p_id = str(item['id'])
                 player_name = item['attributes']['name']
-                # FIX 2: Changed 'player_id' to 'p_id' to match the variable above
                 player_map[p_id] = player_name
+
+            if item['type'] == 'league':
+                l_id = str(item['id'])
+                league_name = item['attributes']['name']
+                league_map[l_id] = league_name
+
 
         print(f"DEBUG: I learned {len(player_map)} player names.")
         
-        # STEP 2: Parse the Projections
+        # Parse through projections to get back ID, Stats, and Lines.
         clean_lines = []
         
         for proj in projections_list:
@@ -50,16 +55,19 @@ class PrizePicksClient:
                 continue
             
             p_id = str(proj['relationships']['new_player']['data']['id'])
-            
             current_name = player_map.get(p_id)
+            
+            l_id = str(proj['relationships']['league']['data']['id'])
+            current_league = league_map.get(l_id)
 
             p_line = proj['attributes']['line_score']
             p_stat = proj['attributes']['stat_type']
 
             my_map = {}
             my_map['ID'] = p_id
-            my_map['Player Name'] = current_name
-            my_map['Player Stat'] = p_stat
+            my_map['Player'] = current_name
+            my_map['League'] = current_league
+            my_map['Stat'] = p_stat
             my_map['Line'] = p_line
 
             clean_lines.append(my_map)
@@ -73,9 +81,6 @@ if __name__ == "__main__":
     
     if not df.empty:
         print(f"Success! Found {len(df)} lines.")
-        # Print just NBA lines to check
-        # (PrizePicks usually uses league_id 7 for NBA, 
-        # but let's just inspect the first few)
         print(df.head())
     else:
         print("DataFrame is empty. Did you fill in the logic?")
