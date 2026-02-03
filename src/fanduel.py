@@ -8,6 +8,8 @@ class FanDuelClient:
         self.api_key = ODDS_API_KEY
         self.base_url = "https://api.the-odds-api.com/v4/sports"
 
+    # Change the variable limit_games when you want to get data
+    # from all available nba games
     def get_all_odds(self, limit_games=3):
         """
         1. Loops through sports in SPORT_MAP.
@@ -96,25 +98,47 @@ class FanDuelClient:
             for market in book['markets']:
                 stat_type = market['key']
                 outcomes = market['outcomes']
-                
-                # TODO: Group these outcomes by Player Name
-                # 1. Create a temporary dictionary to hold players
-                # 2. Loop through 'outcomes'
-                # 3. If 'Over', save the price. If 'Under', save the price.
-                # 4. Combine them into one clean row.
-                
-                pass # <--- Delete this and write your logic
+
+                temp_players = {}
+
+                for outcome in outcomes:
+                    player_name = outcome['description']
+                    side = outcome['name']
+                    line = outcome['point']
+                    price = outcome['price']
+                    
+                    if player_name not in temp_players:
+                        temp_players[player_name] = {
+                            'Player': player_name,
+                            'Stat': stat_type,
+                            'Line': line
+                        }
+
+                    if side == 'Over':
+                        temp_players[player_name]['over_price'] = price
+                    elif side == 'Under':
+                        temp_players[player_name]['under_price'] = price
+
+                for p_data in temp_players.values():
+                    if 'over_price' in p_data and 'under_price' in p_data:
+                        clean_odds.append(p_data)
 
         return clean_odds
 
 # --- TEST BLOCK ---
 if __name__ == "__main__":
     client = FanDuelClient()
-    # Checks NBA, limited to first 3 games
     df = client.get_all_odds(limit_games=3)
     
     if not df.empty:
         print(f"\nSuccess! Gathered {len(df)} player props.")
+        
+        # SAVE TO FILE
+        filename = "fanduel_test_data.csv"
+        df.to_csv(filename, index=False)
+        print(f"Saved all data to {filename}. Go open it!")
+        
+        # Still show the preview
         print(df.head())
     else:
         print("\nNo props found (or maybe no games are scheduled today).")
