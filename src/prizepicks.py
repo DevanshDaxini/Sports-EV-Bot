@@ -81,6 +81,12 @@ if __name__ == "__main__":
     
     if not df.empty:
         print(f"Success! Found {len(df)} lines.")
+        
+        # SAVE TO FILE
+        filename = "prizepicks_test_data.csv"
+        df.to_csv(f'csvFiles/{filename}', index=False)
+        print(f"Saved all data to {filename}. Go open it!")
+
         print(df.head())
     else:
         print("DataFrame is empty. Did you fill in the logic?")
