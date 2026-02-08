@@ -33,30 +33,47 @@ def get_user_date():
         except ValueError:
             print("Invalid format! Please use YYYY-MM-DD (e.g., 2026-02-05)")
 
-def update_history_file(date_str, wins, losses, total, win_rate):
-    """Appends the day's results to a master CSV file."""
+def update_history_file(date_str, wins, losses, total_graded, win_rate):
+    """Updates the master CSV file using the STRICT 6-column format."""
     history_file = "program_runs/win_rate_history.csv"
     
-    # Prepare the new row
-    new_row = {
+    # 1. Prepare the new row data (EXACTLY AS YOU REQUESTED)
+    new_row_data = {
         "Date": date_str,
-        "Total_Bets": total,
+        "Total_Bets": total_graded, # Wins + Losses (No Pushes)
         "Wins": wins,
         "Losses": losses,
         "Win_Rate": f"{win_rate:.2f}%",
         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    df_new = pd.DataFrame([new_row])
-
-    if not os.path.exists(history_file):
-        # Create new file with headers
-        df_new.to_csv(history_file, index=False)
-        print(f"Created new history log: {history_file}")
+    # 2. Check if file exists
+    if os.path.exists(history_file):
+        try:
+            df_history = pd.read_csv(history_file)
+            
+            # Remove any existing rows for this date (Overwrite logic)
+            df_history = df_history[df_history['Date'] != date_str]
+            
+            # Create a DataFrame for the new single row
+            df_new = pd.DataFrame([new_row_data])
+            
+            # Combine
+            df_final = pd.concat([df_history, df_new], ignore_index=True)
+            
+        except Exception:
+            # If file is messed up, start fresh
+            df_final = pd.DataFrame([new_row_data])
     else:
-        # Append to existing file without writing headers again
-        df_new.to_csv(history_file, mode='a', header=False, index=False)
-        print(f"Added entry to: {history_file}")
+        # File doesn't exist, start fresh
+        df_final = pd.DataFrame([new_row_data])
+
+    # 3. Sort by Date
+    df_final = df_final.sort_values(by='Date', ascending=True)
+
+    # 4. Save
+    df_final.to_csv(history_file, index=False)
+    print(f"Updated history log: {history_file}")
 
 def grade_bets():
     # 1. Ask User for Date
@@ -74,12 +91,11 @@ def grade_bets():
 
     # 2. Get ACTUAL Stats from NBA API
     print("Fetching actual game results from NBA API...")
-    # Using '2024-25' season (Change this if grading historical data from older seasons)
+    # NOTE: Ensure season is correct for the date you are checking
     logs = playergamelogs.PlayerGameLogs(season_nullable='2025-26', 
                                          date_from_nullable=target_date, 
                                          date_to_nullable=target_date)
     
-    # Check if API returned data
     frames = logs.get_data_frames()
     if not frames:
         print("NBA API returned no data. (Are games finished? Is the date correct?)")
@@ -87,7 +103,6 @@ def grade_bets():
         
     box_scores = frames[0]
     
-    # Create look-up dict
     player_stats = {}
     for _, row in box_scores.iterrows():
         name = row['PLAYER_NAME']
@@ -99,7 +114,9 @@ def grade_bets():
     # 3. Grade the Bets
     wins = 0
     losses = 0
-    total_graded = 0
+    pushes = 0
+    total_graded = 0 # (Wins + Losses only)
+    
     results = []
     actuals = []
 
@@ -109,13 +126,11 @@ def grade_bets():
         line = row['Line']
         side = row['Side']
         
-        # Handle Missing Players
         if player not in player_stats:
             results.append("DNP/Unknown")
             actuals.append(0)
             continue
             
-        # Get Actual Score
         nba_col = NBA_STAT_MAP.get(prop)
         if not nba_col:
             results.append("Unsupported Stat")
@@ -132,30 +147,34 @@ def grade_bets():
             wins += 1
             total_graded += 1
         elif actual_val == line:
-            results.append("Push") # Tie (doesn't count as win or loss)
+            results.append("Push")
+            pushes += 1
+            # We do NOT add to total_graded (to keep your file format clean)
         else:
             results.append("LOSS")
             losses += 1
             total_graded += 1
 
-    # 4. Save the "Graded" detailed file (Overwrites the daily scan)
+    # 4. Save the detailed results to the daily file
     df['Result'] = results
     df['Actual'] = actuals
     df.to_csv(filename, index=False)
     print(f"Updated daily file with results: {filename}")
     
-    # 5. Save the "Summary" to history log
+    # 5. Save the SUMMARY to history log
     if total_graded > 0:
         win_rate = (wins / total_graded) * 100
         
         print(f"\n--- REPORT CARD ({target_date}) ---")
-        print(f"Wins: {wins}")
+        print(f"Wins:   {wins}")
         print(f"Losses: {losses}")
+        print(f"Pushes: {pushes} (Excluded from file)")
         print(f"WIN RATE: {win_rate:.2f}%")
         
+        # Pass data to the saver (pushes are dropped here)
         update_history_file(target_date, wins, losses, total_graded, win_rate)
     else:
-        print("No bets could be graded (Check if players played).")
+        print("No settled bets found (All DNP or Unknown).")
 
 if __name__ == "__main__":
     grade_bets()
