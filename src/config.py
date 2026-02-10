@@ -33,18 +33,20 @@ SPORT_MAP = {
 REGIONS = 'us'
 
 # Updated and conservative market
-MARKETS = 'player_points,player_rebounds,player_assists'
+MARKETS = (
+        'player_points,player_rebounds,'
+        'player_assists,player_threes,player_blocks,'
+        'player_steals,player_blocks_steals,player_turnovers,'
+        'player_points_rebounds_assists,player_points_rebounds,'
+        'player_points_assists,player_rebounds_assists,'
+        'player_field_goals,player_frees_made,player_frees_attempts,'
+)
 
 # Looking for all of these markets will make lose API keys fast
 """
 MARKETS = (
     # NBA (Basketball)
-    'player_points,player_rebounds,'
-    'player_assists,player_threes,player_blocks,'
-    'player_steals,player_blocks_steals,player_turnovers,'
-    'player_points_rebounds_assists,player_points_rebounds,'
-    'player_points_assists,player_rebounds_assists,'
-    'player_field_goals,player_frees_made,player_frees_attempts,'
+
 
     # NHL (Hockey)
     'player_power_play_points,player_blocked_shots,'
