@@ -20,63 +20,55 @@ def get_user_date():
     """Asks the user for a date and validates it."""
     while True:
         date_str = input("\nEnter the date to grade (YYYY-MM-DD) or press Enter for Yesterday: ")
-        
-        # Default to Yesterday if empty
         if not date_str.strip():
             from datetime import timedelta
             return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        
-        # Validate format
         try:
             datetime.strptime(date_str, "%Y-%m-%d")
             return date_str
         except ValueError:
-            print("Invalid format! Please use YYYY-MM-DD (e.g., 2026-02-05)")
+            print("Invalid format! Please use YYYY-MM-DD")
 
 def update_history_file(date_str, wins, losses, total_graded, win_rate):
     """Updates the master CSV file using the STRICT 6-column format."""
     history_file = "program_runs/win_rate_history.csv"
-    
-    # 1. Prepare the new row data (EXACTLY AS YOU REQUESTED)
     new_row_data = {
         "Date": date_str,
-        "Total_Bets": total_graded, # Wins + Losses (No Pushes)
+        "Total_Bets": total_graded,
         "Wins": wins,
         "Losses": losses,
         "Win_Rate": f"{win_rate:.2f}%",
         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    # 2. Check if file exists
     if os.path.exists(history_file):
         try:
             df_history = pd.read_csv(history_file)
-            
-            # Remove any existing rows for this date (Overwrite logic)
             df_history = df_history[df_history['Date'] != date_str]
-            
-            # Create a DataFrame for the new single row
             df_new = pd.DataFrame([new_row_data])
-            
-            # Combine
             df_final = pd.concat([df_history, df_new], ignore_index=True)
-            
         except Exception:
-            # If file is messed up, start fresh
             df_final = pd.DataFrame([new_row_data])
     else:
-        # File doesn't exist, start fresh
         df_final = pd.DataFrame([new_row_data])
 
-    # 3. Sort by Date
     df_final = df_final.sort_values(by='Date', ascending=True)
-
-    # 4. Save
     df_final.to_csv(history_file, index=False)
     print(f"Updated history log: {history_file}")
 
+def normalize_name(name):
+    """
+    Removes common suffixes to help match PrizePicks names to NBA API names.
+    Ex: 'Tim Hardaway Jr.' -> 'Tim Hardaway'
+    """
+    name = name.lower().replace('.', '') # Remove periods
+    suffixes = [' jr', ' sr', ' ii', ' iii', ' iv']
+    for suffix in suffixes:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)] # Cut off the suffix
+    return name.strip()
+
 def grade_bets():
-    # 1. Ask User for Date
     target_date = get_user_date()
     filename = f"program_runs/scan_{target_date}.csv"
     
@@ -84,14 +76,12 @@ def grade_bets():
     
     if not os.path.exists(filename):
         print(f"ERROR: No file found at {filename}")
-        print("Did you run the scanner on that day?")
         return
 
     df = pd.read_csv(filename)
 
-    # 2. Get ACTUAL Stats from NBA API
     print("Fetching actual game results from NBA API...")
-    # NOTE: Ensure season is correct for the date you are checking
+    # NOTE: Ensure season is correct (2025-26)
     logs = playergamelogs.PlayerGameLogs(season_nullable='2025-26', 
                                          date_from_nullable=target_date, 
                                          date_to_nullable=target_date)
@@ -103,30 +93,46 @@ def grade_bets():
         
     box_scores = frames[0]
     
+    # Create look-up dict with NORMALIZED keys
+    # We store BOTH the exact name and the normalized name to catch everything
     player_stats = {}
     for _, row in box_scores.iterrows():
-        name = row['PLAYER_NAME']
-        player_stats[name] = row.to_dict()
-        player_stats[name]['PRA'] = row['PTS'] + row['REB'] + row['AST']
+        real_name = row['PLAYER_NAME']
+        stats = row.to_dict()
+        stats['PRA'] = row['PTS'] + row['REB'] + row['AST']
+        
+        # Key 1: Exact Match (e.g. "LeBron James")
+        player_stats[real_name] = stats
+        
+        # Key 2: Normalized Match (e.g. "Tim Hardaway" from "Tim Hardaway Jr.")
+        norm_name = normalize_name(real_name)
+        if norm_name != real_name.lower():
+            player_stats[norm_name] = stats
 
-    print(f"Found stats for {len(player_stats)} players.")
+    print(f"Found stats for {len(box_scores)} players.")
 
-    # 3. Grade the Bets
     wins = 0
     losses = 0
     pushes = 0
-    total_graded = 0 # (Wins + Losses only)
+    total_graded = 0 
     
     results = []
     actuals = []
 
     for index, row in df.iterrows():
-        player = row['Player']
+        pp_name = row['Player']
         prop = row['Stat']
         line = row['Line']
         side = row['Side']
         
-        if player not in player_stats:
+        # 1. Try Exact Match
+        stats = player_stats.get(pp_name)
+        
+        # 2. If fail, try Normalized Match
+        if not stats:
+            stats = player_stats.get(normalize_name(pp_name))
+            
+        if not stats:
             results.append("DNP/Unknown")
             actuals.append(0)
             continue
@@ -137,7 +143,7 @@ def grade_bets():
             actuals.append(0)
             continue
             
-        actual_val = player_stats[player].get(nba_col, 0)
+        actual_val = stats.get(nba_col, 0)
         actuals.append(actual_val)
         
         # Determine Outcome
@@ -149,32 +155,27 @@ def grade_bets():
         elif actual_val == line:
             results.append("Push")
             pushes += 1
-            # We do NOT add to total_graded (to keep your file format clean)
         else:
             results.append("LOSS")
             losses += 1
             total_graded += 1
 
-    # 4. Save the detailed results to the daily file
     df['Result'] = results
     df['Actual'] = actuals
     df.to_csv(filename, index=False)
     print(f"Updated daily file with results: {filename}")
     
-    # 5. Save the SUMMARY to history log
     if total_graded > 0:
         win_rate = (wins / total_graded) * 100
-        
         print(f"\n--- REPORT CARD ({target_date}) ---")
         print(f"Wins:   {wins}")
         print(f"Losses: {losses}")
-        print(f"Pushes: {pushes} (Excluded from file)")
+        print(f"Pushes: {pushes} (Excluded)")
         print(f"WIN RATE: {win_rate:.2f}%")
         
-        # Pass data to the saver (pushes are dropped here)
         update_history_file(target_date, wins, losses, total_graded, win_rate)
     else:
-        print("No settled bets found (All DNP or Unknown).")
+        print("No settled bets found.")
 
 if __name__ == "__main__":
     grade_bets()
