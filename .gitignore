@@ -8,3 +8,5 @@ csvFiles/
 program_runs/
 data/
 visualizer.py
+model_images/
+models/
