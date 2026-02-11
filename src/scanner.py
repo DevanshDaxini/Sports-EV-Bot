@@ -54,12 +54,25 @@ def normalize_name(name):
     return " ".join(clean.lower().split())
 
 # --- BETTING LOGIC ---
-def get_betting_indicator(proj, line):
-    """Calculates edge and returns recommendation."""
+def get_betting_indicator(proj, line, target):
+    """
+    Calculates edge with dynamic thresholds based on model confidence.
+    - High-Variance Stats (STL, BLK, SB): 15% Edge required.
+    - Standard Stats (PTS, REB, AST, etc.): 8% Edge required.
+    """
     if line is None or line <= 0: return "⚪ NO LINE"
+    
     diff_pct = (proj - line) / line
-    if diff_pct > 0.08: return f"🟢 OVER ({diff_pct:+.1%})"
-    if diff_pct < -0.08: return f"🔴 UNDER ({diff_pct:+.1%})"
+    
+    # Define high-variance/low-confidence markets
+    high_variance_stats = ['STL', 'BLK', 'SB']
+    
+    # Set threshold based on the target
+    threshold = 0.15 if target in high_variance_stats else 0.08
+    
+    if diff_pct > threshold: return f"🟢 OVER ({diff_pct:+.1%})"
+    if diff_pct < -threshold: return f"🔴 UNDER ({diff_pct:+.1%})"
+    
     return "⚪ NO BET"
 
 # --- CORE FUNCTIONS ---
@@ -183,7 +196,7 @@ def scan_all(df_history, models, todays_teams):
                 line = live_lines.get(player_name, {}).get(target)
                 preds[f"{target}_LINE"] = round(line, 2) if line else None
                 
-                rec = get_betting_indicator(proj, line)
+                rec = get_betting_indicator(proj, line, target)
                 preds[f"{target}_REC"] = rec
                 
                 # Capture the raw edge for sorting
@@ -227,7 +240,7 @@ def scan_all(df_history, models, todays_teams):
         res_df.to_csv(path, index=False)
         print(f"\n✅ Full analysis saved to {path}")
     input("\nPress Enter to continue...")
-    
+
 def main():
     print("...Initializing System")
     df = load_data()
