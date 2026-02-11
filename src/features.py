@@ -44,7 +44,7 @@ def add_advanced_stats(df):
     """
     print("...Calculating Advanced Stats")
     
-    # Calculate TS%
+    # Calculate True Shooting Percentage
     df['TS_PCT'] = df['PTS'] / (2 * (df['FGA'] + 0.44 * df['FTA']))
     df['TS_PCT'] = df['TS_PCT'].fillna(0)
 
