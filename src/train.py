@@ -38,31 +38,18 @@ for stat in ['PTS', 'REB', 'AST', 'FG3M', 'BLK', 'STL', 'TOV']:
     FEATURES.append(f'OPP_{stat}_ALLOWED')
 
 def ensure_combo_stats(df):
-    """
-    Safety Check: Calculates combo stats if they are missing from the CSV.
-    """
-    print("...Verifying Combo Stats (PRA, SB, etc.)")
+    """Calculates combo stats while preventing DataFrame fragmentation."""
+    # Create a copy to de-fragment the frame immediately
+    df = df.copy() 
     
-    # Points + Rebounds + Assists
-    if 'PRA' not in df.columns:
-        df['PRA'] = df['PTS'] + df['REB'] + df['AST']
-        
-    # Points + Rebounds
-    if 'PR' not in df.columns:
-        df['PR'] = df['PTS'] + df['REB']
-        
-    # Points + Assists
-    if 'PA' not in df.columns:
-        df['PA'] = df['PTS'] + df['AST']
-        
-    # Rebounds + Assists
-    if 'RA' not in df.columns:
-        df['RA'] = df['REB'] + df['AST']
-        
-    # Steals + Blocks (Stocks)
-    if 'SB' not in df.columns:
-        df['SB'] = df['STL'] + df['BLK']
-        
+    # Use a dictionary to store new columns for a single concatenation if needed, 
+    # but for just 5 columns, .copy() is usually enough to stop the warning.
+    if 'PRA' not in df.columns: df['PRA'] = df['PTS'] + df['REB'] + df['AST']
+    if 'PR' not in df.columns: df['PR'] = df['PTS'] + df['REB']
+    if 'PA' not in df.columns: df['PA'] = df['PTS'] + df['AST']
+    if 'RA' not in df.columns: df['RA'] = df['REB'] + df['AST']
+    if 'SB' not in df.columns: df['SB'] = df['STL'] + df['BLK']
+    
     return df
 
 def train_and_evaluate():
