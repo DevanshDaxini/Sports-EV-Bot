@@ -13,7 +13,14 @@ NBA_STAT_MAP = {
     'Blocks': 'BLK',
     'Steals': 'STL',
     'Turnovers': 'TOV',
-    'Pts+Rebs+Asts': 'PRA'
+    'Field Goals Made': 'FGM',
+    'Free Throws Made': 'FTM',
+    'Free Throws Attempted': 'FTA',
+    'Pts+Rebs+Asts': 'PRA',
+    'Pts+Rebs': 'PR',
+    'Pts+Asts': 'PA',
+    'Rebs+Asts': 'RA',
+    'Blks+Stls': 'SB'
 }
 
 def get_user_date():
@@ -100,6 +107,10 @@ def grade_bets():
         real_name = row['PLAYER_NAME']
         stats = row.to_dict()
         stats['PRA'] = row['PTS'] + row['REB'] + row['AST']
+        stats['PR']  = row['PTS'] + row['REB']
+        stats['PA']  = row['PTS'] + row['AST']
+        stats['RA']  = row['REB'] + row['AST']
+        stats['SB']  = row['STL'] + row['BLK']
         
         # Key 1: Exact Match (e.g. "LeBron James")
         player_stats[real_name] = stats
