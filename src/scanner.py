@@ -269,8 +269,7 @@ def scout_player(df_history, models):
     print("2. Tomorrow")
     d_choice = input("Select (1/2): ").strip()
     
-    offset = 0
-    if d_choice == '2': offset = 1
+    offset = 1 if d_choice == '2' else 0
     
     todays_teams = get_games(date_offset=offset, require_scheduled=True)
     
@@ -279,56 +278,60 @@ def scout_player(df_history, models):
         input("Press Enter to return to menu...")
         return
 
-    query = input("\nEnter player name: ").strip().lower()
-    matches = df_history[df_history['PLAYER_NAME'].str.lower().str.contains(query)]
-    
-    if matches.empty:
-        print("❌ Player not found in database.")
-        input("Press Enter to continue...")
-        return
-    
-    unique_players = matches[['PLAYER_ID', 'PLAYER_NAME']].drop_duplicates()
-    if len(unique_players) > 1:
-        print(f"\nFound {len(unique_players)} players:")
-        print(unique_players.to_string(index=False))
-        pid_input = input("Enter PLAYER_ID from above: ")
-        try:
-            matches = matches[matches['PLAYER_ID'] == int(pid_input)]
-        except: return
+    scouting = True
+    while scouting:
+        query = input("\nEnter player name: ").strip().lower()
+        matches = df_history[df_history['PLAYER_NAME'].str.lower().str.contains(query)]
+        
+        if matches.empty:
+            print("❌ Player not found in database.")
+        
+        else:
+            unique_players = matches[['PLAYER_ID', 'PLAYER_NAME']].drop_duplicates()
+            if len(unique_players) > 1:
+                print(f"\nFound {len(unique_players)} players:")
+                print(unique_players.to_string(index=False))
+                pid_input = input("Enter PLAYER_ID from above: ")
+                try:
+                    matches = matches[matches['PLAYER_ID'] == int(pid_input)]
+                except: continue
 
-    print("...Fetching live PrizePicks lines")
-    live_lines = fetch_current_lines_dict()
-    norm_lines = {normalize_name(k): v for k, v in live_lines.items()}
+        print("...Fetching live PrizePicks lines")
+        live_lines = fetch_current_lines_dict()
+        norm_lines = {normalize_name(k): v for k, v in live_lines.items()}
 
-    player_data = matches.sort_values('GAME_DATE').iloc[-1]
-    name = player_data['PLAYER_NAME']
-    team_id = player_data['TEAM_ID']
-    
-    if team_id not in todays_teams:
-        print(f"\n⚠️ {name}'s team is not playing on the selected date (or game is over).")
-        input("Press Enter to continue...")
-        return
+        player_data = matches.sort_values('GAME_DATE').iloc[-1]
+        name = player_data['PLAYER_NAME']
+        team_id = player_data['TEAM_ID']
+        
+        if team_id not in todays_teams:
+            print(f"\n⚠️ {name}'s team is not playing on the selected date (or game is over).")
+            input("Press Enter to continue...")
+            return
 
-    is_home = todays_teams.get(team_id, {'is_home': 0})['is_home']
-    
-    print(f"\n📊 SCOUTING REPORT: {name}")
-    print(f"{'MARKET':<8} | {'PROJ':<8} | {'LINE':<8} | {'RECOMMENDATION':<20}")
-    print("-" * 60)
-    
-    input_row = prepare_features(player_data, is_home=is_home)
-    
-    for target in TARGETS:
-        if target in models:
-            feats = models[target].feature_names_in_
-            valid_input = input_row.reindex(columns=feats, fill_value=0)
-            pred = float(models[target].predict(valid_input)[0])
-            
-            line = norm_lines.get(normalize_name(name), {}).get(target)
-            indicator = get_betting_indicator(pred, line)
-            line_str = f"{line:.2f}" if line else "N/A"
-            print(f"{target:<8} : {pred:<8.2f} | {line_str:<8} | {indicator}")
-    
-    input("\nPress Enter to continue...")
+        is_home = todays_teams.get(team_id, {'is_home': 0})['is_home']
+        
+        print(f"\n📊 SCOUTING REPORT: {name}")
+        print(f"{'MARKET':<8} | {'PROJ':<8} | {'LINE':<8} | {'RECOMMENDATION':<20}")
+        print("-" * 60)
+        
+        input_row = prepare_features(player_data, is_home=is_home)
+        
+        for target in TARGETS:
+            if target in models:
+                feats = models[target].feature_names_in_
+                valid_input = input_row.reindex(columns=feats, fill_value=0)
+                pred = float(models[target].predict(valid_input)[0])
+                
+                line = norm_lines.get(normalize_name(name), {}).get(target)
+                indicator = get_betting_indicator(pred, line)
+                line_str = f"{line:.2f}" if line else "N/A"
+                print(f"{target:<8} : {pred:<8.2f} | {line_str:<8} | {indicator}")
+        
+        user_input = input("\nType 'next' to scout another player OR Press Enter for Main Menu: ").lower()
+        
+        if user_input != 'next':
+            scouting = False
 
 def scan_all(df_history, models, is_tomorrow=False):
     offset = 1 if is_tomorrow else 0
