@@ -408,6 +408,10 @@ def main():
         return
 
     while True:
+        os.system('cls' if os.name == 'nt' else 'clear')
+
+        print("")
+        print("")
         print("\n" + "="*30 + "\n   🤖 NBA AI SCANNER v2.7\n" + "="*30)
         print("1. 🚀 Scan TODAY'S Games")
         print("2. 🔮 Scan TOMORROW'S Games")
