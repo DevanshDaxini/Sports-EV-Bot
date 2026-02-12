@@ -10,3 +10,4 @@ data/
 visualizer.py
 model_images/
 models/
+fanduel_cache/
