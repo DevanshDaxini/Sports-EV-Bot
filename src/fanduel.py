@@ -1,7 +1,7 @@
 import requests
 import pandas as pd
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from src.config import ODDS_API_KEY, REGIONS, ODDS_FORMAT, SPORT_MAP, STAT_MAP
 from src.utils import SimpleCache
 
@@ -26,7 +26,8 @@ class FanDuelClient:
 
     def get_all_odds(self, limit_games=None):
         """
-        Fetches odds for all active NBA games.
+        Fetches odds for all active/upcoming NBA games.
+        Automatically grabs tomorrow's games if today's are finished.
         """
         # 1. Check Cache
         cache_key = f"fd_odds_{limit_games}"
@@ -65,16 +66,32 @@ class FanDuelClient:
             games_to_check = games[:limit_games] if limit_games else games
 
             for i, game in enumerate(games_to_check):
-                print(f"      Fetching props for Game {i+1}/{len(games_to_check)}...", end='\r')
-                props = self._fetch_props_for_game(sport_key, game['id'])
+                # --- NEW: Extract Correct Game Date ---
+                # API uses UTC (e.g., 2026-02-12T00:00:00Z for a 7PM EST game)
+                # We convert to roughly EST to match the correct calendar day
+                game_date_str = "Unknown"
+                try:
+                    commence_time = game.get('commence_time')
+                    if commence_time:
+                        # Parse ISO format (YYYY-MM-DDTHH:MM:SSZ)
+                        dt_utc = datetime.strptime(commence_time, "%Y-%m-%dT%H:%M:%SZ")
+                        # Subtract 5 hours to align with US Eastern 'game day'
+                        dt_est = dt_utc - timedelta(hours=5)
+                        game_date_str = dt_est.strftime('%Y-%m-%d')
+                except Exception:
+                    game_date_str = datetime.now().strftime('%Y-%m-%d')
+
+                print(f"      [{game_date_str}] Fetching props for Game {i+1}/{len(games_to_check)}...", end='\r')
+                
+                # Pass the calculated date to the fetcher
+                props = self._fetch_props_for_game(sport_key, game['id'], game_date_str)
                 all_data.extend(props)
                 time.sleep(0.5) # Respect API limits
             print("") # New line after loop
 
         # 3. Save & Return
-        # --- FIX: Handle Empty Data Gracefully ---
+        # Handle Empty Data Gracefully
         if not all_data:
-            # Return an empty DataFrame BUT with the correct columns defined
             return pd.DataFrame(columns=['Player', 'Stat', 'Line', 'Odds', 'Side', 'Date'])
             
         final_df = pd.DataFrame(all_data)
@@ -84,11 +101,10 @@ class FanDuelClient:
         
         return final_df
 
-    def _fetch_props_for_game(self, sport_key, game_id):
+    def _fetch_props_for_game(self, sport_key, game_id, game_date):
         """
         Fetches specific player props for ONE game ID.
         """
-        # We join our SAFE list into a comma-separated string
         markets_string = ",".join(SAFE_MARKETS)
         
         url = f"{self.base_url}/{sport_key}/events/{game_id}/odds"
@@ -103,7 +119,7 @@ class FanDuelClient:
         try:
             response = requests.get(url, params=params)
             if response.status_code != 200:
-                return [] # Skip if error (usually means no props yet)
+                return [] 
             data = response.json()
         except:
             return []
@@ -114,23 +130,20 @@ class FanDuelClient:
         if not bookmakers:
             return []
             
-        # We assume FanDuel is the only bookmaker requested
         book = bookmakers[0] 
         
         for market in book['markets']:
             raw_stat = market['key']
-            # Map "player_points" -> "PTS"
             stat_name = STAT_MAP.get(raw_stat, raw_stat)
             
             for outcome in market['outcomes']:
-                # Flatten the data: One row per Outcome
                 clean_odds.append({
                     'Player': outcome['description'],
                     'Stat': stat_name,
                     'Line': outcome.get('point', 0),
                     'Odds': outcome.get('price', 0),
-                    'Side': outcome['name'], # 'Over' or 'Under'
-                    'Date': datetime.now().strftime('%Y-%m-%d')
+                    'Side': outcome['name'], 
+                    'Date': game_date  # <--- Uses the correct game date now
                 })
 
         return clean_odds
