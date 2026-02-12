@@ -109,7 +109,7 @@ The bot uses a **Balanced Ranking Formula** to prevent AI outliers from skewing 
 | --- | --- |
 | **Math Rank** | Normalizes Implied Win% (Scales 51%–56% to 0–10). |
 | **AI Rank** | Normalizes AI Margin (Scales 0%–25% edge to 0–10). |
-| **Volatility** | Multiplier based on stat predictability (e.g., REB = 1.15, FG3M = 0.85). |
+| **Volatility** | Multiplier based on stat predictability (e.g., REB = 1.15, FG3M = 0.90). |
 
 ---
 
