@@ -28,16 +28,21 @@ jobs:
       run: |
         pip install pandas numpy xgboost nba_api requests python-dotenv fuzzywuzzy scikit-learn joblib
 
-    # 4. Re-Build Data (Recreates the missing CSV from scratch)
+    # 4. Re-Build Data
     - name: Build & Engineer Data
+      # ADD THIS env BLOCK HERE
+      env:
+        PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
       run: |
         python3 src/builder.py
         python3 src/features.py
 
-    # 5. Run the Bot (Headless Mode)
+    # 5. Run the Bot
     - name: Run AI Scanner
+      # ADD THIS env BLOCK HERE
       env:
         ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
       run: |
         python3 run_bot.py
 
