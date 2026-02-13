@@ -524,7 +524,12 @@ def scout_player(df_history, models):
 
     scouting = True
     while scouting:
-        query = input("\nEnter player name: ").strip().lower()
+        print("\n(Type '0' to return to Main Menu)")
+        query = input("Enter player name: ").strip().lower()
+        if query == '0':
+            print("Returning to menu...")
+            break
+
         matches = df_history[df_history['PLAYER_NAME'].str.lower().str.contains(query)]
         if matches.empty:
             print("❌ Player not found in database.")
