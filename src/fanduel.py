@@ -1,3 +1,34 @@
+"""
+FanDuel Odds Client (via The Odds API)
+
+Fetches player prop odds from FanDuel sportsbook using The Odds API.
+Implements disk caching to minimize API credit usage.
+
+API Credits:
+    Each game's props costs 1 credit
+    500 requests/month on free tier
+    
+Caching Strategy:
+    - Saves odds to fanduel_cache/fanduel_cache.json
+    - Cache valid for 30 minutes
+    - Reuses cache if <30 mins old (saves credits)
+    
+Markets Fetched:
+    player_points, player_rebounds, player_assists, player_threes,
+    player_points_rebounds_assists, player_blocks, player_steals,
+    player_turnovers, player_field_goals, player_frees_made, etc.
+    
+Usage:
+    from src.fanduel import FanDuelClient
+    client = FanDuelClient()
+    odds_df = client.get_all_odds(limit_games=5)
+    
+Output Format:
+    DataFrame with columns: Player, Stat, Line, Odds, Side, Date
+    Example: LeBron James, Points, 25.5, -120, Over, 2026-02-12
+"""
+
+
 import requests
 import pandas as pd
 import time
@@ -10,7 +41,8 @@ from src.utils import SimpleCache
 # --- CONFIGURATION ---
 CACHE_DIR = 'fanduel_cache'
 CACHE_FILE = os.path.join(CACHE_DIR, 'fanduel_cache.json')
-CACHE_DURATION_MINUTES = 60  # <--- Adjust this (e.g., 30, 60, 120 mins)
+# FIX #7: Reduce cache duration to 30 mins for fresher odds (was 60)
+CACHE_DURATION_MINUTES = 30
 
 # Expanded Market List
 SAFE_MARKETS = [
@@ -59,8 +91,36 @@ class FanDuelClient:
 
     def get_all_odds(self, limit_games=None):
         """
-        Fetches odds with DISK CACHING to save API credits.
+        Fetch player prop odds with intelligent caching.
+        
+        Args:
+            limit_games (int or None): Max games to fetch (None = all games)
+                                       Use for testing: limit_games=1
+                                       
+        Returns:
+            pandas.DataFrame: Player props with Over/Under odds
+            
+        Process:
+            1. Check disk cache (fanduel_cache/fanduel_cache.json)
+            2. If cache <30 mins old, return cached data (0 credits used)
+            3. If cache expired:
+                a. Fetch game schedule from API
+                b. For each game, fetch player props
+                c. Sleep 0.5s between requests (rate limiting)
+                d. Save to cache
+                e. Return DataFrame
+                
+        Cache Logic:
+            ♻️  Using Saved FanDuel Data from 15 mins ago.
+               (0 API Credits Used) - Expires in 15 mins
+               
+            💸 Cache expired or missing. Fetching fresh odds (Costs Credits)...
+               
+        Note:
+            Each call costs up to N credits (N = number of games)
+            Use limit_games=1 for testing
         """
+
         # 1. Try Loading from Disk First (Saves $$$)
         cached_df = self._load_from_disk_cache()
         if cached_df is not None:
@@ -124,7 +184,22 @@ class FanDuelClient:
         return final_df
 
     def _load_from_disk_cache(self):
-        """Checks if a valid local cache file exists."""
+        """
+        Load cached odds from disk if valid.
+        
+        Returns:
+            pandas.DataFrame or None: Cached data if <30 mins old, else None
+            
+        Checks:
+            1. Does fanduel_cache/fanduel_cache.json exist?
+            2. Is file <30 minutes old?
+            3. Is JSON valid?
+            
+        Note:
+            Prints warning if cache is too old
+            Returns None silently if file doesn't exist
+        """
+
         if not os.path.exists(CACHE_FILE):
             return None
             
@@ -148,7 +223,21 @@ class FanDuelClient:
             return None
 
     def _save_to_disk_cache(self, data_list):
-        """Saves the fresh data to a JSON file inside the cache folder."""
+        """
+        Save fresh odds to disk for future use.
+        
+        Args:
+            data_list (list): Raw odds data (list of dicts)
+            
+        Side Effects:
+            - Creates fanduel_cache/ folder if doesn't exist
+            - Writes JSON to fanduel_cache/fanduel_cache.json
+            - Prints confirmation message
+            
+        Note:
+            Fails silently if write error (doesn't crash program)
+        """
+
         try:
             # Create the directory if it doesn't exist
             if not os.path.exists(CACHE_DIR):
@@ -163,6 +252,16 @@ class FanDuelClient:
 
 
     def _fetch_props_for_game(self, sport_key, game_id, game_date):
+        """
+        Docstring for _fetch_props_for_game
+        
+        :param self: Description
+        :param sport_key: Description
+        :param game_id: Description
+        :param game_date: Description
+        
+        :return: List of cleaned odds dictionaries
+        """
         markets_string = ",".join(SAFE_MARKETS)
         
         url = f"{self.base_url}/{sport_key}/events/{game_id}/odds"
