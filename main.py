@@ -36,7 +36,17 @@ PP_NORMALIZATION_MAP = {
     'Free Throws Made': 'Free Throws Made',
     'Turnovers': 'Turnovers',
     'Steals': 'Steals',
-    'Fantasy Score': 'Fantasy', # Filter out if needed, or map
+    'Fantasy Score': 'Fantasy', 
+    
+    # CRITICAL: MAPPING THE "MISSING" MARKETS
+    'FG Made': 'Field Goals Made',
+    'FG Attempted': 'Field Goals Attempted', 
+    'Free Throws Attempted': 'Free Throws Attempted',
+    'Blks+Stls': 'Blks+Stls',
+    'Pts+Rebs+Asts': 'Pts+Rebs+Asts',
+    'Pts+Rebs': 'Pts+Rebs',
+    'Pts+Asts': 'Pts+Asts',
+    'Rebs+Asts': 'Rebs+Asts'
 }
 
 # --- 2. STAT MAPPING (Standard Name -> AI Target Code) ---
@@ -51,19 +61,19 @@ STAT_MAPPING = {
     'Rebs+Asts': 'RA',
     'Blks+Stls': 'SB',
     
-    # Alternative Markets (The ones you were missing)
+    # Alternative Markets
     '3-Pt Made': 'FG3M',
     'Blocks': 'BLK',
     'Steals': 'STL',
     'Turnovers': 'TOV',
     'Free Throws Made': 'FTM',
     'Field Goals Made': 'FGM',
-    'Free Throws Attempted': 'FTA'
+    'Free Throws Attempted': 'FTA',
+    'Field Goals Attempted': 'FGA'
 }
 
 # --- SCORING CONFIGURATION ---
 # Higher weight = More predictable/reliable stat
-# Lower weight = High variance/streaky stat
 VOLATILITY_MAP = {
     'PTS': 1.0,  
     'REB': 1.15,  
@@ -75,7 +85,14 @@ VOLATILITY_MAP = {
     'FG3M': 0.90, 
     'BLK': 0.75, 
     'STL': 0.75,
-    'TOV': 0.9   
+    'TOV': 0.9,
+    
+    # NEW WEIGHTS FOR EFFICIENCY PROPS
+    'SB': 0.8,
+    'FGM': 1.0,
+    'FGA': 1.0,
+    'FTM': 0.9,
+    'FTA': 0.9
 }
 
 # --- HELPER: RUN AI PREDICTIONS ---
@@ -134,6 +151,7 @@ def run_correlated_scanner():
         pp_df = pp.fetch_board()
         
         if not pp_df.empty:
+            # FIX: Normalize PrizePicks names to match FanDuel
             pp_df['Stat'] = pp_df['Stat'].replace(PP_NORMALIZATION_MAP)
 
         fd = FanDuelClient()
@@ -178,7 +196,10 @@ def run_correlated_scanner():
     # 3. Correlate Results
     print("\n--- 3. Correlating Results ---")
     
+    # Map Math Stats to AI Target Codes (e.g., 'Points' -> 'PTS')
     math_bets['Stat'] = math_bets['Stat'].map(STAT_MAPPING).fillna(math_bets['Stat'])
+    
+    # Normalize names for merging
     math_bets['CleanName'] = math_bets['Player'].apply(normalize_name)
     ai_df['CleanName'] = ai_df['Player'].apply(normalize_name)
     
