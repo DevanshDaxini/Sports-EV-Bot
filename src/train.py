@@ -1,3 +1,41 @@
+"""
+XGBoost Model Training Pipeline
+
+Trains separate regression models for 17 NBA statistics using time-series split
+validation. Implements feature leakage prevention to ensure models don't "peek"
+at the stat they're predicting.
+
+Models Trained:
+    Base Stats: PTS, REB, AST, FG3M, FG3A, BLK, STL, TOV, FGM, FGA, FTM, FTA
+    Combo Stats: PRA, PR, PA, RA, SB
+    
+Evaluation Metrics:
+    - MAE (Mean Absolute Error): Average prediction error in stat units
+    - R² Score: Explained variance (0 to 1, higher is better)
+    - Directional Accuracy: % of times predicting correct over/under side
+    
+Key Features:
+    - Time-series split (train on past, test on future)
+    - Feature leakage prevention (TOV model doesn't see TOV_L5)
+    - Early stopping (prevents overfitting)
+    - Saves models as JSON (portable, human-readable)
+    
+Configuration:
+    TEST_START_DATE = '2025-02-01' - Games after this are test set
+    n_estimators = 1000 - Number of decision trees
+    learning_rate = 0.05 - Step size for gradient descent
+    max_depth = 5 - Maximum tree depth
+    early_stopping_rounds = 50 - Stop if no improvement
+    
+Usage:
+    $ python3 -m src.train
+    
+Output:
+    models/PTS_model.json
+    models/REB_model.json
+    ... (17 model files total)
+"""
+
 import pandas as pd
 import xgboost as xgb
 import os
@@ -12,9 +50,9 @@ TEST_START_DATE = '2025-02-01'  # We test on games after this date
 # 1. DEFINE TARGETS
 # These are the columns the model will try to predict.
 TARGETS = [
-    'PTS', 'REB', 'AST', 'FG3M', 'BLK', 'STL', 'TOV',  # Base Stats
-    'PRA', 'PR', 'PA', 'RA', 'SB',                     # Combo Stats (SB = Steals+Blocks)
-    'FGM', 'FTM', 'FTA'                                # Efficiency Stats
+    'PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'BLK', 'STL', 'TOV',  # Base Stats
+    'PRA', 'PR', 'PA', 'RA', 'SB',       # Combo Stats (SB = Steals+Blocks)
+    'FGM','FGA', 'FTM', 'FTA'                            # Efficiency Stats
 ]
 
 # 2. DEFINE FEATURES
@@ -27,18 +65,58 @@ FEATURES = [
     'STL_L5', 'STL_L20', 'STL_Season',
     'BLK_L5', 'BLK_L20', 'BLK_Season',
     'TOV_L5', 'TOV_L20', 'TOV_Season',
+    'FGM_L5', 'FGM_L20', 'FGM_Season',
+    'FTM_L5', 'FTM_L20', 'FTM_Season',
     'MIN_L5', 'MIN_L20', 'MIN_Season',
     'GAME_SCORE_L5', 'GAME_SCORE_L20', 'GAME_SCORE_Season',
-    'TS_PCT', 'DAYS_REST', 'IS_HOME'
+    'USAGE_RATE_L5', 'USAGE_RATE_L20', 'USAGE_RATE_Season',
+    'MISSING_USAGE',
+    'TS_PCT', 'DAYS_REST', 'IS_HOME',
+    # FIX #5: Add missing engineered features
+    'GAMES_7D', 'IS_4_IN_6', 'IS_B2B', 'IS_FRESH',
+    'PACE_ROLLING', 'FGA_PER_MIN', 'TOV_PER_USAGE',
+    'USAGE_VACUUM', 'STAR_COUNT'
 ]
+
+# Add combo rolling features if they exist
+combo_features = []
+for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
+    combo_features.extend([f'{combo}_L5', f'{combo}_L20', f'{combo}_Season'])
+FEATURES.extend(combo_features)
 
 # Add Defense Columns dynamically
 # (We assume features.py created columns like 'OPP_PTS_ALLOWED')
-for stat in ['PTS', 'REB', 'AST', 'FG3M', 'BLK', 'STL', 'TOV']:
+for stat in ['PTS', 'REB', 'AST', 'FG3M','FGA', 'BLK', 'STL', 'TOV',
+             'FGM', 'FTM', 'FTA']:
     FEATURES.append(f'OPP_{stat}_ALLOWED')
 
+# Add combo defensive features
+for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
+    FEATURES.append(f'OPP_{combo}_ALLOWED')
+
 def ensure_combo_stats(df):
-    """Calculates combo stats while preventing DataFrame fragmentation."""
+    """
+    Create combo stat columns if they don't exist.
+    
+    Combo Stats:
+        PRA = Points + Rebounds + Assists
+        PR  = Points + Rebounds
+        PA  = Points + Assists
+        RA  = Rebounds + Assists
+        SB  = Steals + Blocks
+        
+    Args:
+        df (pandas.DataFrame): Dataset with PTS, REB, AST, STL, BLK columns
+        
+    Returns:
+        pandas.DataFrame: Input df with combo columns added
+        
+    Note:
+        Uses .copy() to prevent DataFrame fragmentation warning
+        Only creates columns that don't already exist (safe to call 
+            multiple times)
+    """
+    
     # Create a copy to de-fragment the frame immediately
     df = df.copy() 
     
@@ -53,6 +131,35 @@ def ensure_combo_stats(df):
     return df
 
 def train_and_evaluate():
+    """
+    Main training loop - trains all 17 models and evaluates performance.
+    
+    Workflow:
+        1. Load data/training_dataset.csv
+        2. Calculate combo stats (safety check)
+        3. Split into train (before TEST_START_DATE) and test (after)
+        4. For each target stat:
+            a. Filter features to prevent leakage (e.g., TOV model doesn't see TOV_L5)
+            b. Train XGBoost model with early stopping
+            c. Evaluate on test set (MAE, R², Directional Accuracy)
+            d. Save model to models/{TARGET}_model.json
+            
+    Output:
+        Prints to console:
+            Training Model for: PTS...
+             -> MAE: 1.99 (On average, off by 1.99 PTS)
+             -> R2 Score: 0.886 (Predictive Power)
+             -> Directional Accuracy: 89.7% (Predicting Right Side)
+             -> Saved to models/PTS_model.json
+             
+    Raises:
+        FileNotFoundError: If data/training_dataset.csv doesn't exist
+        
+    Note:
+        Models with <10 features after filtering print a warning
+        (indicates possible configuration error)
+    """
+
     print("--- STARTING TRAINING PIPELINE ---")
     
     # 1. Load Data
@@ -85,9 +192,17 @@ def train_and_evaluate():
             print(f" -> SKIPPING {target} (Column not found in data)")
             continue
 
-        X_train = train_df[FEATURES]
+        # FIX #15: Filter out features that contain the target stat to prevent leakage
+        # Example: TOV model shouldn't see TOV_L5, TOV_Season, OPP_TOV_ALLOWED, TOV_PER_USAGE
+        features_to_use = [f for f in FEATURES if target not in f]
+        
+        # Verify we still have features left after filtering
+        if len(features_to_use) < 10:
+            print(f" -> WARNING: Only {len(features_to_use)} features after filtering for {target}")
+        
+        X_train = train_df[features_to_use]
         y_train = train_df[target]
-        X_test = test_df[FEATURES]
+        X_test = test_df[features_to_use]
         y_test = test_df[target]
         
         # Configure XGBoost
@@ -111,8 +226,16 @@ def train_and_evaluate():
         mae = mean_absolute_error(y_test, predictions)
         r2 = r2_score(y_test, predictions)
         
+        # FIX #11: Add directional accuracy (how often we predict the right side)
+        # Use the median of the test set as the "line"
+        test_median = y_test.median()
+        actual_over = (y_test > test_median).astype(int)
+        predicted_over = (predictions > test_median).astype(int)
+        directional_accuracy = (actual_over == predicted_over).mean()
+        
         print(f" -> MAE: {mae:.2f} (On average, off by {mae:.2f} {target})")
         print(f" -> R2 Score: {r2:.3f} (Predictive Power)")
+        print(f" -> Directional Accuracy: {directional_accuracy:.1%} (Predicting Right Side)")
         
         # Save
         model_path = f"{MODEL_DIR}/{target}_model.json"
