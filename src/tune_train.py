@@ -24,14 +24,32 @@ FEATURES = [
     'STL_L5', 'STL_L20', 'STL_Season',
     'BLK_L5', 'BLK_L20', 'BLK_Season',
     'TOV_L5', 'TOV_L20', 'TOV_Season',
+    'FGM_L5', 'FGM_L20', 'FGM_Season',
+    'FTM_L5', 'FTM_L20', 'FTM_Season',
     'MIN_L5', 'MIN_L20', 'MIN_Season',
     'GAME_SCORE_L5', 'GAME_SCORE_L20', 'GAME_SCORE_Season',
-    'TS_PCT', 'DAYS_REST', 'IS_HOME'
+    'USAGE_RATE_L5', 'USAGE_RATE_L20', 'USAGE_RATE_Season',
+    'MISSING_USAGE',
+    'TS_PCT', 'DAYS_REST', 'IS_HOME',
+    # FIX #5: Add missing engineered features
+    'GAMES_7D', 'IS_4_IN_6', 'IS_B2B', 'IS_FRESH',
+    'PACE_ROLLING', 'FGA_PER_MIN', 'TOV_PER_USAGE',
+    'USAGE_VACUUM', 'STAR_COUNT'
 ]
+
+# Add combo rolling features
+combo_features = []
+for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
+    combo_features.extend([f'{combo}_L5', f'{combo}_L20', f'{combo}_Season'])
+FEATURES.extend(combo_features)
 
 # Add Defense Columns
 for stat in ['PTS', 'REB', 'AST', 'FG3M', 'BLK', 'STL', 'TOV']:
     FEATURES.append(f'OPP_{stat}_ALLOWED')
+
+# Add combo defensive features
+for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
+    FEATURES.append(f'OPP_{combo}_ALLOWED')
 
 def ensure_combo_stats(df):
     """Calculates combo stats if they are missing."""
@@ -76,13 +94,19 @@ def tune_and_train():
         
         if target not in df.columns: continue
 
-        X_train = train_df[FEATURES]
+        # FIX #15: Filter out features that contain the target stat to prevent leakage
+        features_to_use = [f for f in FEATURES if target not in f]
+        
+        X_train = train_df[features_to_use]
         y_train = train_df[target]
-        X_test = test_df[FEATURES]
+        X_test = test_df[features_to_use]
         y_test = test_df[target]
         
         # 1. Initialize Base Model
         xgb_model = xgb.XGBRegressor(n_jobs=-1, random_state=42)
+        
+        # FIX #4: Use TimeSeriesSplit to respect temporal order
+        tscv = TimeSeriesSplit(n_splits=3)
         
         # 2. Setup Random Search
         # This tries 15 random combinations from the grid above
@@ -91,7 +115,7 @@ def tune_and_train():
             param_distributions=param_grid,
             n_iter=15,  # Tries 15 different settings
             scoring='neg_mean_absolute_error',
-            cv=3,       # Cross-validation splits
+            cv=tscv,       # FIX: Use time-aware cross-validation
             verbose=1,
             n_jobs=-1,
             random_state=42
