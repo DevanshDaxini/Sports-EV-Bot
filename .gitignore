@@ -3,11 +3,8 @@ __pycache__/
 *.pyc
 venv/
 .DS_Store
-csvFiles/
-*.csvnotebooks/
 program_runs/
 data/
-visualizer.py
-model_images/
-models/
 fanduel_cache/
+models/
+csvFiles/
