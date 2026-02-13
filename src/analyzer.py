@@ -1,3 +1,40 @@
+"""
+Props Edge Analyzer - FanDuel vs PrizePicks Comparison
+
+Calculates "true probability" by removing bookmaker vig from FanDuel odds,
+then identifies opportunities where true probability exceeds PrizePicks breakeven rate.
+
+Mathematical Approach:
+    1. Convert FanDuel Over/Under odds to implied probabilities
+    2. Remove vig: true_prob = implied_prob / (sum of both sides)
+    3. Compare to PrizePicks hurdle rate (e.g., 54.25% for 5-man flex)
+    4. Return profitable opportunities
+    
+Example:
+    FanDuel: LeBron 25.5 Points, Over -120, Under +100
+    
+    Step 1: Convert to probabilities
+        prob_over = 120/220 = 54.5%
+        prob_under = 100/200 = 50.0%
+        
+    Step 2: Remove vig
+        market_total = 54.5% + 50.0% = 104.5% (vig = 4.5%)
+        true_over = 54.5% / 104.5% = 52.2%
+        true_under = 50.0% / 104.5% = 47.8%
+        
+    Step 3: Compare to PrizePicks
+        If PrizePicks line is also 25.5, and true_over (52.2%) < hurdle (54.25%)
+        → Skip (no edge)
+        
+        If PrizePicks line is 26.5 (easier), and true_over (52.2%) < hurdle
+        → Potential OVER bet
+        
+Usage:
+    from src.analyzer import PropsAnalyzer
+    analyzer = PropsAnalyzer(prizepicks_df, fanduel_df)
+    edges = analyzer.calculate_edges()
+"""
+
 import pandas as pd
 from fuzzywuzzy import process
 from src.config import SLIP_CONFIG
@@ -9,10 +46,34 @@ class PropsAnalyzer:
 
     def calculate_edges(self):
         """
-        1. Reshapes FanDuel data to have Over/Under odds in one row.
-        2. Iterates through PrizePicks lines to find matches.
-        3. Calculates 'True Probability' and returns profitable plays.
+        Find profitable opportunities by comparing PrizePicks to FanDuel.
+        
+        Returns:
+            pandas.DataFrame: Rows with columns:
+                Date, Player, League, Stat, Line, Side, Implied_Win_%, FD_Odds
+                
+        Process:
+            1. Reshape FanDuel from long (Over/Under separate rows) to wide (one row)
+            2. For each PrizePicks line:
+                a. Find matching player in FanDuel (fuzzy name matching)
+                b. Find matching stat (Points, Rebounds, etc.)
+                c. Handle line discrepancies (PP 25.5 vs FD 26.5)
+                d. Calculate true probabilities
+                e. Store opportunities where true_prob > breakeven
+                
+        Line Discrepancy Handling:
+            If PP line < FD line by 0.5-1.5:
+                → OVER is easier (recommend OVER only)
+            If PP line > FD line by 0.5-1.5:
+                → UNDER is easier (recommend UNDER only)
+            If difference > 1.5:
+                → Different markets, skip
+                
+        Note:
+            Uses fuzzy name matching with 80% threshold
+            Warns if >30% of FanDuel lines are lost during merge
         """
+
         opportunities = []
         
         # --- STEP 1: RESHAPE FANDUEL DATA (Long -> Wide) ---
@@ -36,12 +97,19 @@ class PropsAnalyzer:
         
         # Merge them back together on Player, Stat, Line, and Date
         # We use 'inner' merge because we need BOTH sides to calculate fair odds
+        before_merge = len(fd_over)
         self.fd_wide = pd.merge(
             fd_over, 
             fd_under, 
             on=['Player', 'Stat', 'Line', 'Date'], 
             how='inner'
         )
+        after_merge = len(self.fd_wide)
+        
+        # FIX #9: Warn if we lost too many lines (indicates missing Over/Under sides)
+        if after_merge < before_merge * 0.7:
+            print(f"⚠️  Warning: Only {after_merge}/{before_merge} lines had both Over and Under odds")
+            print(f"    Lost {before_merge - after_merge} opportunities due to incomplete data")
         # ---------------------------------------------------
 
         # 2. Loop through every row in the PrizePicks DataFrame
@@ -125,9 +193,20 @@ class PropsAnalyzer:
 
     def _find_match_in_fanduel(self, pp_name):
         """
-        Helper: Uses fuzzy matching to find 
-        the closest player name in the transformed Fanduel data.
+        Docstring for _find_match_in_fanduel
+        
+        :param self: Description
+        :param pp_name: Description
+
+        :return: Description
+
+        Explanation:
+            Uses fuzzy string matching to find the closest player name in 
+            the FanDuel dataset. Returns the matched name and the corresponding 
+            rows from the FanDuel DataFrame.If no good match is found 
+            (score < 80), returns (None, None).
         """
+
         # We search in self.fd_wide now, not self.fd_df
         if hasattr(self, 'fd_wide') and not self.fd_wide.empty:
             search_df = self.fd_wide
@@ -138,7 +217,9 @@ class PropsAnalyzer:
         
         match_name, score = process.extractOne(pp_name, fd_unique_name)
         
-        if score < 85:
+        # FIX #8: Lower threshold from 85 to 80 to catch more valid matches
+        # (handles Jr/Sr suffix differences better)
+        if score < 80:
             return None, None
         
         player_rows = search_df[search_df['Player'] == match_name]
@@ -147,8 +228,22 @@ class PropsAnalyzer:
 
     def _calculate_true_probability(self, over_odds, under_odds):
         """
-        Helper: Converts American Odds to True Probability (removing vig).
+        Docstring for _calculate_true_probability
+        
+        :param self: Description
+        :param over_odds: Description
+        :param under_odds: Description
+        
+        :return: Description
+        
+        :rtype: tuple
+        
+        Explanation:
+            Converts American odds to implied probabilities, then removes the 
+            bookmaker's vig to calculate the "true" probabilities for both 
+            the Over and Under sides.
         """
+        
         def odds_to_prob(odds):
             if odds < 0:
                 return (-odds) / ((-odds) + 100)
