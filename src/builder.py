@@ -1,3 +1,31 @@
+"""
+Historical NBA Data Collection
+
+Downloads raw game logs and player positions from NBA's official API.
+Creates the foundational dataset for feature engineering and model training.
+
+Data Sources:
+    - nba_api.stats.endpoints.playergamelogs - Box scores for all players
+    - nba_api.stats.endpoints.commonteamroster - Player positions
+    
+Output Files:
+    data/raw_game_logs.csv - ~200K rows (all players, all seasons)
+    data/player_positions.csv - ~500 rows (active players + positions)
+    
+Configuration:
+    SEASONS = ['2022-23', '2023-24', '2024-25', '2025-26']
+    
+Usage:
+    $ python3 -m src.builder
+    
+Performance:
+    Takes ~3-5 minutes for 4 seasons (includes API rate limiting)
+    
+Note:
+    Respects NBA API rate limits with time.sleep() calls
+    Safe to run multiple times (positions file skips if exists)
+"""
+
 import pandas as pd
 import time
 import os
@@ -13,9 +41,34 @@ OUTPUT_FILE = f'{DATA_FOLDER}/raw_game_logs.csv'
 
 def fetch_all_game_logs():
     """
-    Downloads game logs for ALL active players for the specified seasons.
-    This creates the massive dataset needed for training.
+    Download box scores for all players across multiple seasons.
+    
+    Steps:
+        1. Create data/ folder if doesn't exist
+        2. For each season in SEASONS:
+            a. Call playergamelogs API (bulk endpoint)
+            b. Tag rows with SEASON_ID
+            c. Append to list
+            d. Sleep 1 second (rate limiting)
+        3. Concatenate all seasons
+        4. Save to data/raw_game_logs.csv
+        
+    Output:
+        CSV with columns: PLAYER_ID, PLAYER_NAME, TEAM_ID, GAME_ID, 
+                         GAME_DATE, PTS, REB, AST, FGM, FGA, etc.
+                         
+    Note:
+        Uses playergamelogs.PlayerGameLogs() instead of looping through
+        individual players (100x faster)
+        
+    Example Output:
+        --- STARTING HISTORICAL DOWNLOAD (4 Seasons) ---
+        Fetching logs for season: 2022-23...
+         -> Found 48532 game rows for 2022-23
+        ...
+        SUCCESS: Saved 194128 total game rows to data/raw_game_logs.csv
     """
+
     if not os.path.exists(DATA_FOLDER):
         os.makedirs(DATA_FOLDER)
         print(f"Created folder: {DATA_FOLDER}")
@@ -57,9 +110,30 @@ def fetch_all_game_logs():
 
 def fetch_player_positions():
     """
-    Fetches the position (G, F, C) for every active player.
-    We do this by looping through all 30 NBA Teams' rosters.
+    Download current player positions (G, F, C) for all 30 teams.
+    
+    Steps:
+        1. Check if data/player_positions.csv exists (skip if yes)
+        2. Get all 30 NBA team IDs from nba_api.stats.static.teams
+        3. For each team:
+            a. Call commonteamroster API
+            b. Extract PLAYER, PLAYER_ID, POSITION columns
+            c. Sleep 0.6 seconds (rate limiting)
+        4. Concatenate all rosters
+        5. Save to data/player_positions.csv
+        
+    Output:
+        CSV with columns: PLAYER, PLAYER_ID, POSITION
+        Example: LeBron James, 2544, F
+        
+    Note:
+        Skips download if file exists (avoids redundant API calls)
+        Position data is used for defensive matchup features
+        
+    Positions:
+        G (Guard), F (Forward), C (Center), G-F, F-C, etc.
     """
+
     POSITION_FILE = f'{DATA_FOLDER}/player_positions.csv'
     
     if os.path.exists(POSITION_FILE):
