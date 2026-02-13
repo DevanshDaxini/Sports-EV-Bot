@@ -1,9 +1,30 @@
+# Environment
 .env
+venv/
+venv*/
 __pycache__/
 *.pyc
-venv/
-.DS_Store
+*.pyo
+
+# Data files (large, not tracked)
+data/nba/raw/
+data/nba/processed/
+data/cbb/
+
+# Model binaries (regenerate with train.py)
+models/nba/*.json
+models/cbb/
+
+# Output / scan results
+output/
+
+# FanDuel API cache
 fanduel_cache/
-models/
-csvFiles/
-data/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
