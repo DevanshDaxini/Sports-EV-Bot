@@ -40,6 +40,8 @@ import pandas as pd
 import xgboost as xgb
 import os
 import joblib
+import csv
+from datetime import datetime
 from sklearn.metrics import mean_absolute_error, r2_score
 
 # --- CONFIGURATION ---
@@ -183,6 +185,8 @@ def train_and_evaluate():
     if not os.path.exists(MODEL_DIR):
         os.makedirs(MODEL_DIR)
 
+    all_metrics = []
+
     # 4. Train Loop
     for target in TARGETS:
         print(f"\nTraining Model for: {target}...")
@@ -232,6 +236,14 @@ def train_and_evaluate():
         actual_over = (y_test > test_median).astype(int)
         predicted_over = (predictions > test_median).astype(int)
         directional_accuracy = (actual_over == predicted_over).mean()
+
+        all_metrics.append({
+            'Target': target,
+            'MAE': round(mae, 4),
+            'R2': round(r2, 4),
+            'Directional_Accuracy': round(directional_accuracy * 100, 2),
+            'Last_Updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
         
         print(f" -> MAE: {mae:.2f} (On average, off by {mae:.2f} {target})")
         print(f" -> R2 Score: {r2:.3f} (Predictive Power)")
@@ -241,6 +253,15 @@ def train_and_evaluate():
         model_path = f"{MODEL_DIR}/{target}_model.json"
         model.save_model(model_path)
         print(f" -> Saved to {model_path}")
+
+    # Save all metrics to a CSV for tracking over time
+    metrics_file = os.path.join(MODEL_DIR, 'model_metrics.csv')
+    keys = all_metrics[0].keys()
+    with open(metrics_file, 'w', newline='') as f:
+        dict_writer = csv.DictWriter(f, fieldnames=keys)
+        dict_writer.writeheader()
+        dict_writer.writerows(all_metrics)
+    print(f"\n✅ Performance metrics saved to {metrics_file}")
 
     print("\n--- ALL MODELS TRAINED ---")
 
