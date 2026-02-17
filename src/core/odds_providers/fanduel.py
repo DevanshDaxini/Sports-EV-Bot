@@ -233,8 +233,8 @@ class FanDuelClient:
 
 
 if __name__ == "__main__":
-    # For standalone testing, import the NBA config directly
-    from core.config import ODDS_API_KEY, SPORT_MAP, REGIONS, ODDS_FORMAT, STAT_MAP
+    # Run from project root: python -m src.core.odds_providers.fanduel
+    from src.sports.nba.config import ODDS_API_KEY, SPORT_MAP, REGIONS, ODDS_FORMAT, STAT_MAP
     client = FanDuelClient(ODDS_API_KEY, SPORT_MAP, REGIONS, ODDS_FORMAT, STAT_MAP)
     df = client.get_all_odds(limit_games=1)
     if not df.empty:
