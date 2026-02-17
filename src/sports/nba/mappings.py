@@ -54,23 +54,27 @@ STAT_MAPPING = {
     'Field Goals Attempted': 'FGA'
 }
 
-# Stat reliability weight for combined scoring
-# Higher = more predictable stat = score weighted upward
+# Stat reliability weight for combined scoring.
+# Higher = more predictable stat = score weighted upward.
+# Penalties are intentionally mild — enough to rank high-confidence stats
+# above volatile ones when edge is equal, but not so severe that BLK/STL/SB
+# can never appear. At 0.90 a BLK play only needs ~54% win rate to match a
+# PTS play at 53.5%, which is achievable.
 VOLATILITY_MAP = {
-    'PTS': 1.0,
+    'PTS': 1.00,
     'REB': 1.15,
-    'AST': 1.1,
+    'AST': 1.10,
     'PRA': 1.05,
-    'PR': 1.05,
-    'PA': 1.05,
-    'RA': 1.1,
-    'FG3M': 0.90,
-    'BLK': 0.75,
-    'STL': 0.75,
-    'TOV': 0.9,
-    'SB': 0.8,
-    'FGM': 1.0,
-    'FGA': 1.0,
-    'FTM': 0.9,
-    'FTA': 0.9
+    'PR':  1.05,
+    'PA':  1.05,
+    'RA':  1.10,
+    'FG3M': 0.95,
+    'BLK':  0.90,  # was 0.75 — softened so BLK can compete
+    'STL':  0.90,  # was 0.75 — softened so STL can compete
+    'SB':   0.95,  # was 0.80 — softened so Blks+Stls can compete
+    'TOV':  0.92,  # was 0.90
+    'FGM':  1.00,
+    'FGA':  1.00,
+    'FTM':  0.92,  # was 0.90
+    'FTA':  0.92,  # was 0.90
 }
