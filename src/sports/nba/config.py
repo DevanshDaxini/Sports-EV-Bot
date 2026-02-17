@@ -117,7 +117,7 @@ for tier, data in MODEL_TIERS.items():
 # 5. Scanning Mode
 # Controls which model tiers to include in a scan run.
 # Options: 'ELITE_ONLY', 'SAFE', 'BALANCED', 'AGGRESSIVE', 'ALL'
-SCANNING_MODE = 'BALANCED'
+SCANNING_MODE = 'ALL'
 
 SCANNING_MODES = {
     'ELITE_ONLY': MODEL_TIERS['ELITE']['models'],
