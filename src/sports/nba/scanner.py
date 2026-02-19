@@ -23,7 +23,7 @@ import requests
 from nba_api.stats.endpoints import ScoreboardV2, LeagueGameLog
 
 from src.core.odds_providers.prizepicks import PrizePicksClient
-from src.sports.nba.config   import STAT_MAP, MODEL_QUALITY, ACTIVE_TARGETS
+from src.sports.nba.config   import STAT_MAP, MODEL_QUALITY, ACTIVE_TARGETS, ABSORPTION_RATES
 from src.sports.nba.injuries import get_injury_report
 
 # --- CONFIGURATION ---
@@ -140,8 +140,19 @@ def load_models():
 
 # stats.nba.com is often slow/unreliable - use timeout + retries
 NBA_API_TIMEOUT = 45   # Fail faster, rely on retries
-NBA_API_RETRIES = 4
+NBA_API_RETRIES = 3
 NBA_API_RETRY_DELAY = 5
+
+# cdn.nba.com endpoints — fast and reliable
+CDN_SCOREBOARD_URL = "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
+CDN_SCHEDULE_URL   = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
+CDN_TIMEOUT = 15
+
+CDN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
 
 # Catch all request-related errors (timeout, connection, etc.)
 _REQUEST_ERRORS = (
@@ -154,14 +165,79 @@ _REQUEST_ERRORS = (
 )
 
 
-def _fetch_scoreboard(game_date, retries=NBA_API_RETRIES):
-    """Fetch scoreboard with retries and extended timeout (stats.nba.com is flaky)."""
+def _cdn_scoreboard_to_df(games_list):
+    """Convert cdn.nba.com games list to a DataFrame matching ScoreboardV2 format."""
+    rows = []
+    for g in games_list:
+        rows.append({
+            'GAME_ID':         g.get('gameId', ''),
+            'GAME_STATUS_ID':  g.get('gameStatus', 1),
+            'HOME_TEAM_ID':    g.get('homeTeam', {}).get('teamId', 0),
+            'VISITOR_TEAM_ID': g.get('awayTeam', {}).get('teamId', 0),
+        })
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def _fetch_scoreboard_cdn(game_date):
+    """
+    Fetch scoreboard via cdn.nba.com (primary, fast).
+
+    - For today's games: uses the live scoreboard endpoint.
+    - For any date: uses the full-season schedule endpoint.
+    """
+    target = datetime.strptime(game_date, '%Y-%m-%d').date()
+    today  = datetime.now().date()
+
+    # Fast path: today's games via the live scoreboard
+    if target == today:
+        try:
+            print(f"   📡 Fetching today's scoreboard from cdn.nba.com...", flush=True)
+            resp = requests.get(CDN_SCOREBOARD_URL, headers=CDN_HEADERS, timeout=CDN_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            games = data.get('scoreboard', {}).get('games', [])
+            df = _cdn_scoreboard_to_df(games)
+            if not df.empty:
+                return df
+        except Exception as e:
+            print(f"   ⚠️  CDN live scoreboard failed ({type(e).__name__}), trying schedule...", flush=True)
+
+    # Fallback / future dates: use the full schedule
+    return _fetch_schedule_cdn(game_date)
+
+
+def _fetch_schedule_cdn(game_date):
+    """Fetch games for a specific date from the cdn.nba.com season schedule."""
+    from datetime import datetime as _dt
+    target = _dt.strptime(game_date, '%Y-%m-%d').date()
+    try:
+        print(f"   📡 Fetching schedule from cdn.nba.com...", flush=True)
+        resp = requests.get(CDN_SCHEDULE_URL, headers=CDN_HEADERS, timeout=CDN_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        for gd in data.get('leagueSchedule', {}).get('gameDates', []):
+            date_str = gd.get('gameDate', '')
+            try:
+                gd_date = _dt.strptime(date_str, '%m/%d/%Y %H:%M:%S').date()
+            except ValueError:
+                continue
+            if gd_date == target:
+                return _cdn_scoreboard_to_df(gd.get('games', []))
+        # Date exists but no games scheduled
+        return pd.DataFrame()
+    except Exception as e:
+        print(f"   ⚠️  CDN schedule failed ({type(e).__name__})", flush=True)
+        return None
+
+
+def _fetch_scoreboard_statsapi(game_date, retries=NBA_API_RETRIES):
+    """Fetch scoreboard from stats.nba.com (fallback — often slow/unreliable)."""
     for attempt in range(retries):
         try:
             if attempt > 0:
-                print(f"   ⏳ Retry {attempt + 1}/{retries}...", flush=True)
+                print(f"   ⏳ Retry {attempt + 1}/{retries} (stats.nba.com)...", flush=True)
             else:
-                print(f"   📡 Fetching from stats.nba.com (up to {NBA_API_TIMEOUT}s)...", flush=True)
+                print(f"   📡 Trying stats.nba.com fallback (up to {NBA_API_TIMEOUT}s)...", flush=True)
             sys.stdout.flush()
             board = ScoreboardV2(
                 game_date=game_date, league_id='00', day_offset=0, timeout=NBA_API_TIMEOUT
@@ -174,6 +250,32 @@ def _fetch_scoreboard(game_date, retries=NBA_API_RETRIES):
             else:
                 raise
     return None
+
+
+def _fetch_scoreboard(game_date, retries=NBA_API_RETRIES):
+    """
+    Fetch scoreboard with automatic failover:
+      1. cdn.nba.com  (fast, reliable)
+      2. stats.nba.com (legacy fallback)
+    """
+    # --- Primary: cdn.nba.com ---
+    try:
+        df = _fetch_scoreboard_cdn(game_date)
+        if df is not None and not df.empty:
+            print(f"   ✅ Got {len(df)} games from cdn.nba.com", flush=True)
+            return df
+        elif df is not None:
+            # CDN responded but no games on this date
+            return df
+    except Exception as e:
+        print(f"   ⚠️  cdn.nba.com failed ({type(e).__name__}), falling back...", flush=True)
+
+    # --- Fallback: stats.nba.com ---
+    try:
+        return _fetch_scoreboard_statsapi(game_date, retries=retries)
+    except Exception as e:
+        print(f"   ❌ Both cdn.nba.com and stats.nba.com failed ({type(e).__name__})", flush=True)
+        raise
 
 
 def get_games(date_offset=0, require_scheduled=True, max_days_forward=7):
@@ -350,7 +452,7 @@ def scan_all(df_history, models, is_tomorrow=False):
             if p_rows.empty: continue
             last_row = p_rows.iloc[-1]
             if get_player_status(last_row['PLAYER_NAME']) == 'OUT':
-                usage = last_row.get('USAGE_RATE_Season', 0)
+                usage = last_row.get('USAGE_RATE_SEASON', 0)
                 if usage > 15:
                     missing_usage_today += usage
 
@@ -377,6 +479,12 @@ def scan_all(df_history, models, is_tomorrow=False):
                 valid_input = input_row.reindex(columns=model_features, fill_value=0)
                 proj = float(model.predict(valid_input)[0])
                 player_predictions[target] = proj
+
+            # --- Injury redistribution adjustments ---
+            inj_adj = _calculate_injury_adjustments(df_history, team_id, pid)
+            for stat, adj_val in inj_adj.items():
+                if stat in player_predictions:
+                    player_predictions[stat] += adj_val
 
             # Apply correlation constraints
             if 'PRA' in player_predictions:
@@ -550,6 +658,90 @@ def prepare_features(player_row, is_home=0, days_rest=2, missing_usage=0):
     features['IS_B2B']        = 1 if days_rest == 1 else 0
     features['MISSING_USAGE'] = missing_usage
     return pd.DataFrame([features])
+
+
+# --- STAT COLUMNS used for injury redistribution ---
+# NOTE: load_data() uppercases all columns, so use UPPERCASE here
+_STAT_SEASON_COLS = {
+    'PTS': 'PTS_SEASON', 'REB': 'REB_SEASON', 'AST': 'AST_SEASON',
+    'FG3M': 'FG3M_SEASON', 'FGM': 'FGM_SEASON', 'FGA': 'FGA_SEASON',
+    'FG3A': 'FG3A_SEASON', 'FTM': 'FTM_SEASON', 'FTA': 'FTA_SEASON',
+    'STL': 'STL_SEASON', 'BLK': 'BLK_SEASON', 'TOV': 'TOV_SEASON',
+}
+
+
+def _calculate_injury_adjustments(df_history, team_id, active_pid):
+    """
+    Calculate per-stat injury adjustments for a single active player.
+
+    For each OUT teammate, sum their season-average production per stat.
+    Distribute that missing production to active players proportional to
+    each active player's usage share.  Scale by ABSORPTION_RATE per stat.
+
+    Args:
+        df_history: full historical DataFrame
+        team_id:    team to analyse
+        active_pid: PLAYER_ID of the player getting the adjustment
+
+    Returns:
+        dict  {stat: adjustment_value, ...}
+              e.g. {'PTS': +2.31, 'REB': +1.80, 'AST': +0.42, ...}
+    """
+    team_df = df_history[df_history['TEAM_ID'] == team_id]
+    all_pids = team_df['PLAYER_ID'].unique()
+
+    # --- Gather last-row data for every teammate ---
+    out_production = {}       # stat -> total missing production
+    active_usage   = {}       # pid  -> usage rate (for active players)
+
+    for pid in all_pids:
+        p_rows = team_df[team_df['PLAYER_ID'] == pid].sort_values('GAME_DATE')
+        if p_rows.empty:
+            continue
+        last = p_rows.iloc[-1]
+        pname = last['PLAYER_NAME']
+        usage = last.get('USAGE_RATE_SEASON', 0)
+
+        if get_player_status(pname) == 'OUT':
+            # Accumulate missing production
+            for stat, col in _STAT_SEASON_COLS.items():
+                val = last.get(col, 0)
+                if pd.notna(val) and val > 0:
+                    out_production[stat] = out_production.get(stat, 0) + val
+        else:
+            if usage > 0:
+                active_usage[pid] = usage
+
+    if not out_production or active_pid not in active_usage:
+        return {}  # nothing to adjust
+
+    # --- Redistribute proportionally by usage share ---
+    total_active_usage = sum(active_usage.values())
+    player_share = active_usage[active_pid] / total_active_usage
+
+    adjustments = {}
+    for stat, missing_total in out_production.items():
+        rate = ABSORPTION_RATES.get(stat, 0.40)
+        adj  = missing_total * player_share * rate
+        if abs(adj) > 0.01:
+            adjustments[stat] = round(adj, 2)
+
+    # Derive combo-stat adjustments from components
+    pts_adj = adjustments.get('PTS', 0)
+    reb_adj = adjustments.get('REB', 0)
+    ast_adj = adjustments.get('AST', 0)
+    stl_adj = adjustments.get('STL', 0)
+    blk_adj = adjustments.get('BLK', 0)
+
+    if pts_adj or reb_adj or ast_adj:
+        adjustments['PRA'] = round(pts_adj + reb_adj + ast_adj, 2)
+        adjustments['PR']  = round(pts_adj + reb_adj, 2)
+        adjustments['PA']  = round(pts_adj + ast_adj, 2)
+        adjustments['RA']  = round(reb_adj + ast_adj, 2)
+    if stl_adj or blk_adj:
+        adjustments['SB'] = round(stl_adj + blk_adj, 2)
+
+    return adjustments
 
 
 def grade_results():
@@ -730,13 +922,20 @@ def scout_player(df_history, models):
             if p_rows.empty: continue
             last_row = p_rows.iloc[-1]
             if get_player_status(last_row['PLAYER_NAME']) == 'OUT':
-                usage = last_row.get('USAGE_RATE_Season', 0)
+                usage = last_row.get('USAGE_RATE_SEASON', 0)
                 if usage > 15: missing_usage_today += usage
 
         print(f"\n📊 SCOUTING REPORT: {name} ({actual_date})")
         print(f"🚑 Team Injury Impact: {missing_usage_today:.1f}% Missing Usage")
-        print(f"{'TIER':<6} | {'MARKET':<8} | {'PROJ':<8} | {'LINE':<8} | RECOMMENDATION")
-        print("-" * 75)
+
+        # Calculate injury adjustments for this player
+        pid_for_adj = matches.sort_values('GAME_DATE').iloc[-1]['PLAYER_ID']
+        inj_adj = _calculate_injury_adjustments(df_history, team_id, pid_for_adj)
+        if inj_adj:
+            print(f"📈 Injury Boost: adjustments applied for {len(inj_adj)} stats")
+
+        print(f"{'TIER':<6} | {'MARKET':<8} | {'PROJ':<14} | {'LINE':<8} | RECOMMENDATION")
+        print("-" * 85)
 
         input_row = prepare_features(player_data, is_home=is_home, missing_usage=missing_usage_today)
 
@@ -745,11 +944,17 @@ def scout_player(df_history, models):
                 tier_emoji    = MODEL_QUALITY.get(target, {}).get('emoji', '?')
                 model_features = [f for f in models[target].feature_names_in_ if target not in f]
                 valid_input   = input_row.reindex(columns=model_features, fill_value=0)
-                pred          = float(models[target].predict(valid_input)[0])
+                base_pred     = float(models[target].predict(valid_input)[0])
+                adj           = inj_adj.get(target, 0)
+                pred          = base_pred + adj
                 line          = norm_lines.get(normalize_name(name), {}).get(target)
                 indicator     = get_betting_indicator(pred, line)
                 line_str      = f"{line:.2f}" if line else "N/A"
-                print(f"{tier_emoji:<6} | {target:<8} : {pred:<8.2f} | {line_str:<8} | {indicator}")
+                if abs(adj) > 0.01:
+                    proj_str  = f"{pred:<5.2f} (+{adj:.1f})"
+                else:
+                    proj_str  = f"{pred:<5.2f}      "
+                print(f"{tier_emoji:<6} | {target:<8} : {proj_str:<14} | {line_str:<8} | {indicator}")
 
         if input("\nScout another player? (y/n): ").lower() != 'y':
             scouting = False
