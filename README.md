@@ -86,20 +86,18 @@ sports_ev_bot/
 │   ├── sports/
 │   │   ├── __init__.py
 │   │   ├── nba/
-│   │   │   ├── __init__.py
-│   │   │   ├── config.py
-│   │   │   ├── mappings.py
-│   │   │   ├── builder.py
-│   │   │   ├── features.py
-│   │   │   ├── scanner.py
-│   │   │   ├── train.py
-│   │   │   ├── tune_train.py
-│   │   │   ├── injuries.py
-│   │   │   ├── grader.py
-│   │   │   └── check_features.py
-│   │   └── cbb/
 │   │       ├── __init__.py
-│   │       └── config.py
+│   │       ├── config.py
+│   │       ├── mappings.py
+│   │       ├── builder.py
+│   │       ├── features.py
+│   │       ├── scanner.py
+│   │       ├── train.py
+│   │       ├── tune_train.py
+│   │       ├── injuries.py
+│   │       ├── grader.py
+│   │       └── check_features.py
+│   │      
 │   └── cli/
 │       ├── __init__.py
 │       └── nba_cli.py
