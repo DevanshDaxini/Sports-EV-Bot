@@ -1,4 +1,4 @@
-# 🏀 Basketball Prop Correlation & Projection Engine
+# Prop Correlation & Projection Engine
 
 ### Technical Audit & Predictive Performance Documentation
 
@@ -6,7 +6,7 @@ An advanced sports analytics suite developed in **Python** that identifies high-
 
 ---
 
-## 📈 Evidence of Model Legitimacy
+## Evidence of Model Legitimacy
 
 The model's credibility is built on verifiable regression metrics and directional accuracy. Below are the performance benchmarks from the most recent training cycle.
 
@@ -29,31 +29,31 @@ The engine is graded against a **54.1% win rate threshold**, the mathematical br
 
 ---
 
-## ⚙️ Core Architectural Features
+## Core Architectural Features
 
 The model's reliability is a result of several specialized sub-systems designed to handle the volatility of professional basketball.
 
-### 🚑 Teammate "Usage Vacuum" Logic
+### Teammate "Usage Vacuum" Logic
 
 The engine monitors **Missing Usage**. When a high-volume player is ruled **OUT**, the system calculates the percentage of team possessions suddenly available.
 
 * **Feature:** `MISSING_USAGE` / `USAGE_VACUUM`
 * **Impact:** Identifies "blow-up" opportunities for secondary players before the betting market can adjust the lines.
 
-### 🛡️ Feature Leakage Prevention
+### Feature Leakage Prevention
 
 To ensure "honest" metrics, `train.py` strictly prevents the model from "peeking" at relevant stats from the game it is trying to predict.
 
 * **Logic:** The model is blocked from seeing any rolling averages or opponent-allowed stats that contain the target variable for that specific game date.
 
-### 🔋 Fatigue & Schedule Density Mapping
+### Fatigue & Schedule Density Mapping
 
 Performance is adjusted based on the human element of the NBA schedule.
 
 * **`IS_4_IN_6`**: Flags teams playing their 4th game in 6 nights.
 * **`DAYS_REST`**: Adjusts for the performance "rust" of long layoffs versus the fatigue of back-to-back games.
 
-### 📉 Position-Specific Defensive Analysis
+### Position-Specific Defensive Analysis
 
 Instead of general defensive rankings, the bot utilizes **OPP_ALLOWED** stats filtered by position.
 
@@ -61,7 +61,7 @@ Instead of general defensive rankings, the bot utilizes **OPP_ALLOWED** stats fi
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```text
 sports_ev_bot/
@@ -119,7 +119,7 @@ sports_ev_bot/
 
 ---
 
-## 🚀 Usage & Validation
+## Usage & Validation
 
 1. **Configure:** Add your `ODDS_API_KEY` to the `.env` file.
 2. **Build:** Run `builder.py`, `features.py`, and `train.py` to sync latest data and train the AI.
@@ -128,7 +128,7 @@ sports_ev_bot/
 
 ---
 
-## ⚖️ Disclaimer
+## Disclaimer
 
 This software is for **educational and research purposes only**. Sports betting involves significant financial risk. I do not guarantee profit and am not responsible for any financial losses.
 
