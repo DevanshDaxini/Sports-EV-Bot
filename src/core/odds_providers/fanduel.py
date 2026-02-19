@@ -97,22 +97,30 @@ class FanDuelClient:
         self.base_url = "https://api.the-odds-api.com/v4/sports"
         self.cache = SimpleCache(duration=300)
 
-    def get_all_odds(self, limit_games=None):
+    def get_all_odds(self, limit_games=None, target_date=None):
         """
         Fetch player prop odds with intelligent caching.
         
         Args:
             limit_games (int or None): Max games to fetch (None = all games)
                                        Use for testing: limit_games=1
+            target_date (str or None): Only fetch games on this date 'YYYY-MM-DD'.
+                                       If None, fetches all upcoming games.
                                        
         Returns:
             pandas.DataFrame: Player props with Over/Under odds
         """
         cached_df = self._load_from_disk_cache()
         if cached_df is not None:
-            return cached_df
+            if target_date and 'Date' in cached_df.columns:
+                filtered = cached_df[cached_df['Date'] == target_date]
+                if not filtered.empty:
+                    return filtered
+                print(f"   Cache has no data for {target_date}, fetching fresh...")
+            else:
+                return cached_df
 
-        print(f"   💸 Cache expired or missing. Fetching fresh odds (Costs Credits)...")
+        print(f"   \U0001f4b8 Cache expired or missing. Fetching fresh odds (Costs Credits)...")
         all_data = []
 
         for league_name, sport_key in self.sport_map.items():
@@ -135,7 +143,24 @@ class FanDuelClient:
                 print(f"      Error fetching schedule: {e}")
                 continue
 
-            print(f"      Found {len(games)} games.")
+            # Filter to target date if specified
+            if target_date:
+                filtered_games = []
+                for g in games:
+                    try:
+                        ct = g.get('commence_time')
+                        if ct:
+                            dt_utc = datetime.strptime(ct, "%Y-%m-%dT%H:%M:%SZ")
+                            dt_est = dt_utc - timedelta(hours=5)
+                            if dt_est.strftime('%Y-%m-%d') == target_date:
+                                filtered_games.append(g)
+                    except:
+                        pass
+                print(f"      Found {len(games)} total games, {len(filtered_games)} on {target_date}.")
+                games = filtered_games
+            else:
+                print(f"      Found {len(games)} games.")
+
             games_to_check = games[:limit_games] if limit_games else games
 
             for i, game in enumerate(games_to_check):
@@ -169,13 +194,13 @@ class FanDuelClient:
             file_mod_time = os.path.getmtime(CACHE_FILE)
             file_age_minutes = (time.time() - file_mod_time) / 60
             if file_age_minutes < CACHE_DURATION_MINUTES:
-                print(f"   ♻️  Using Saved FanDuel Data from {int(file_age_minutes)} mins ago.")
-                print(f"       (0 API Credits Used) - Expires in {int(CACHE_DURATION_MINUTES - file_age_minutes)} mins")
+                print(f"   \u267b\ufe0f  Using Saved FanDuel Data from {int(file_age_minutes)} min(s) ago.")
+                print(f"       (0 API Credits Used) - Expires in {int(CACHE_DURATION_MINUTES - file_age_minutes)} min(s)")
                 with open(CACHE_FILE, 'r') as f:
                     data = json.load(f)
                 return pd.DataFrame(data)
             else:
-                print(f"   ⚠️  Saved data is too old ({int(file_age_minutes)} mins). Need refresh.")
+                print(f"   \u26a0\ufe0f  Saved data is too old ({int(file_age_minutes)} mins). Need refresh.")
                 return None
         except Exception as e:
             print(f"   Warning: Could not load cache: {e}")
@@ -185,10 +210,10 @@ class FanDuelClient:
         try:
             if not os.path.exists(CACHE_DIR):
                 os.makedirs(CACHE_DIR)
-                print(f"   📂 Created directory: {CACHE_DIR}")
+                print(f"   \U0001f4c2 Created directory: {CACHE_DIR}")
             with open(CACHE_FILE, 'w') as f:
                 json.dump(data_list, f)
-            print(f"   💾 Saved fresh odds to '{CACHE_FILE}' for future use.")
+            print(f"   \U0001f4be Saved fresh odds to '{CACHE_FILE}' for future use.")
         except Exception as e:
             print(f"   Warning: Could not save cache: {e}")
 
@@ -206,14 +231,17 @@ class FanDuelClient:
         try:
             response = requests.get(url, params=params)
             if response.status_code != 200:
+                print(f"\n      \u274c API Error {response.status_code} for game {game_id}: {response.text[:300]}")
                 return []
             data = response.json()
-        except:
+        except Exception as e:
+            print(f"\n      \u274c Request exception for game {game_id}: {e}")
             return []
 
         clean_odds = []
         bookmakers = data.get('bookmakers', [])
         if not bookmakers:
+            print(f"\n      \u26a0\ufe0f  No FanDuel bookmaker data for game {game_id} (bookmakers list empty)")
             return []
         book = bookmakers[0]
 
@@ -233,8 +261,8 @@ class FanDuelClient:
 
 
 if __name__ == "__main__":
-    # Run from project root: python -m src.core.odds_providers.fanduel
-    from src.sports.nba.config import ODDS_API_KEY, SPORT_MAP, REGIONS, ODDS_FORMAT, STAT_MAP
+    # For standalone testing, import the NBA config directly
+    from core.config import ODDS_API_KEY, SPORT_MAP, REGIONS, ODDS_FORMAT, STAT_MAP
     client = FanDuelClient(ODDS_API_KEY, SPORT_MAP, REGIONS, ODDS_FORMAT, STAT_MAP)
     df = client.get_all_odds(limit_games=1)
     if not df.empty:
