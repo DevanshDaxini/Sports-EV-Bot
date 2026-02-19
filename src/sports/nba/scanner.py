@@ -12,6 +12,7 @@ Usage:
 import pandas as pd
 import xgboost as xgb
 import os
+import sys
 import time
 import warnings
 import unicodedata
@@ -118,23 +119,38 @@ def load_models():
     return models
 
 
-# stats.nba.com is often slow/unreliable - use longer timeout + retries
-NBA_API_TIMEOUT = 90
-NBA_API_RETRIES = 3
-NBA_API_RETRY_DELAY = 8
+# stats.nba.com is often slow/unreliable - use timeout + retries
+NBA_API_TIMEOUT = 45   # Fail faster, rely on retries
+NBA_API_RETRIES = 4
+NBA_API_RETRY_DELAY = 5
+
+# Catch all request-related errors (timeout, connection, etc.)
+_REQUEST_ERRORS = (
+    requests.exceptions.Timeout,
+    requests.exceptions.ReadTimeout,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.RequestException,
+    ConnectionError,
+    OSError,
+)
 
 
 def _fetch_scoreboard(game_date, retries=NBA_API_RETRIES):
     """Fetch scoreboard with retries and extended timeout (stats.nba.com is flaky)."""
     for attempt in range(retries):
         try:
+            if attempt > 0:
+                print(f"   ⏳ Retry {attempt + 1}/{retries}...", flush=True)
+            else:
+                print(f"   📡 Fetching from stats.nba.com (up to {NBA_API_TIMEOUT}s)...", flush=True)
+            sys.stdout.flush()
             board = ScoreboardV2(
                 game_date=game_date, league_id='00', day_offset=0, timeout=NBA_API_TIMEOUT
             )
             return board.game_header.get_data_frame()
-        except (requests.exceptions.Timeout, requests.exceptions.ReadTimeout, ConnectionError, OSError) as e:
+        except _REQUEST_ERRORS as e:
             if attempt < retries - 1:
-                print(f"   ⏳ Timeout (attempt {attempt + 1}/{retries}), retrying in {NBA_API_RETRY_DELAY}s...")
+                print(f"   ⏳ Request failed ({type(e).__name__}), retrying in {NBA_API_RETRY_DELAY}s...", flush=True)
                 time.sleep(NBA_API_RETRY_DELAY)
             else:
                 raise
@@ -421,24 +437,34 @@ def scan_all(df_history, models, is_tomorrow=False):
         
         # Sort by tier and edge
         tier_order = {'ELITE': 0, 'STRONG': 1, 'DECENT': 2, 'RISKY': 3, 'AVOID': 4}
-        deduped_bets.sort(key=lambda x: (tier_order.get(x['TIER'], 99), -abs(x['PCT_EDGE'])))
+        # Extract tier name for sorting (TIER is "⭐ ELITE", we need "ELITE")
+        def _tier_key(b):
+            for name in tier_order:
+                if name in b.get('TIER', ''):
+                    return tier_order[name]
+            return 99
+        deduped_bets.sort(key=lambda x: (_tier_key(x), -abs(x['PCT_EDGE'])))
         
         # Take top 10 after deduplication
         top_overs  = [b for b in deduped_bets if b['EDGE'] > 0][:10]
         top_unders = [b for b in deduped_bets if b['EDGE'] < 0][:10]
 
+        # Table format — consistent column widths, spacing, separator
+        sep = "-" * 73
         print("\n🔥 TOP 10 OVERS (Highest Value)")
+        print()
         print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<5} | {'AI vs PP':<15} | {'EDGE %':<8}")
-        print("-" * 85)
+        print(sep)
         for bet in top_overs:
-            print(f" {bet['TIER']:<12} | {bet['NAME']:<20} | {bet['TARGET']:<5} | "
+            print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<5} | "
                   f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}%")
 
         print("\n❄️ TOP 10 UNDERS (Lowest Value)")
+        print()
         print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<5} | {'AI vs PP':<15} | {'EDGE %':<8}")
-        print("-" * 85)
+        print(sep)
         for bet in top_unders:
-            print(f" {bet['TIER']:<12} | {bet['NAME']:<20} | {bet['TARGET']:<5} | "
+            print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<5} | "
                   f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}%")
 
         # Determine save filename based on actual date used
