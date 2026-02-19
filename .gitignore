@@ -36,3 +36,6 @@ src/sports/nba/tune_train.py
 
 # Tennis data (large processed file, not tracked)
 data/tennis/processed/
+
+# Tennis model binaries (regenerate with train.py)
+models/tennis/*.json
