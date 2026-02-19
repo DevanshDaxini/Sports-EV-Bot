@@ -39,7 +39,7 @@ OUTPUT_DIR = os.path.join(_BASE, 'output', 'nba', 'scans')
 
 # --- HELPER: RUN AI PREDICTIONS ---
 def get_ai_predictions():
-    print("...Loading AI Models & Data")
+    print("Loading AI models & data...")
     refresh_injuries()  # Fresh injury data for accurate projections
     df_history = load_data()
     models     = load_models()
@@ -73,7 +73,7 @@ def get_ai_predictions():
     if not all_teams:
         return pd.DataFrame()
 
-    print("...Generating AI Projections")
+    print("Generating AI projections...")
     ai_results = []
 
     for team_id, info in all_teams.items():
@@ -123,11 +123,11 @@ def get_ai_predictions():
 def run_correlated_scanner():
     print("")
     print("\n" + "="*50)
-    print("   🚀 SUPER SCANNER (Math + AI Correlation)")
+    print("   SUPER SCANNER (Math + AI Correlation)")
     print("="*50)
 
     # 1. Fetch market odds
-    print("\n--- 1. Fetching Market Odds (FanDuel vs PrizePicks) ---")
+    print("\n--- 1. Fetching Market Odds ---")
     try:
         import time
 
@@ -139,11 +139,11 @@ def run_correlated_scanner():
             if not pp_df.empty:
                 break
             if attempt < 3:
-                print(f"   ⏳ PrizePicks attempt {attempt}/3 failed. Retrying in 10s...")
+                print(f"   PrizePicks attempt {attempt}/3 failed. Retrying in 10s...")
                 time.sleep(10)
 
         if pp_df.empty:
-            print("❌ PrizePicks unavailable after 3 attempts. Cannot run correlation.")
+            print("PrizePicks unavailable after 3 attempts.")
             input("Press Enter...")
             return
 
@@ -154,10 +154,13 @@ def run_correlated_scanner():
             api_key=ODDS_API_KEY, sport_map=SPORT_MAP,
             regions=REGIONS, odds_format=ODDS_FORMAT, stat_map=STAT_MAP
         )
-        fd_df = fd.get_all_odds()
+        # Determine the active slate date (handles late-night rollover)
+        _, target_date = get_games(date_offset=0, require_scheduled=True)
+        print(f"   Active slate: {target_date}")
+        fd_df = fd.get_all_odds(target_date=target_date)
 
         if fd_df.empty:
-            print("❌ FanDuel data unavailable. Cannot run correlation.")
+            print(f"FanDuel odds unavailable for {target_date}.")
             input("Press Enter...")
             return
 
@@ -165,16 +168,16 @@ def run_correlated_scanner():
         math_bets = analyzer.calculate_edges()
 
         if math_bets.empty:
-            print("❌ No math-based edges found.")
+            print("No math-based edges found.")
             input("Press Enter...")
             return
 
-        print(f"✅ Found {len(math_bets)} math-based plays.")
+        print(f"Found {len(math_bets)} math-based plays.")
         unique_stats = math_bets['Stat'].unique()
-        print(f"   ℹ️  Markets found: {', '.join(unique_stats)}")
+        print(f"   Markets: {', '.join(unique_stats)}")
 
     except Exception as e:
-        print(f"❌ Error in Odds Scanner: {e}")
+        print(f"Error in Odds Scanner: {e}")
         return
 
     # 2. AI Projections
@@ -182,11 +185,11 @@ def run_correlated_scanner():
     try:
         ai_df = get_ai_predictions()
         if ai_df.empty:
-            print("❌ Could not generate AI projections.")
+            print("Could not generate AI projections.")
             return
-        print(f"✅ Generated {len(ai_df)} AI projections.")
+        print(f"Generated {len(ai_df)} AI projections.")
     except Exception as e:
-        print(f"❌ Error in AI Scanner: {e}")
+        print(f"Error in AI Scanner: {e}")
         return
 
     # 3. Correlate
@@ -203,7 +206,7 @@ def run_correlated_scanner():
         keep='first'
     )
     if before > len(merged):
-        print(f"   🧹 Removed {before - len(merged)} duplicate entries")
+        print(f"   Removed {before - len(merged)} duplicate entries")
 
     correlated_plays = []
 
@@ -229,12 +232,14 @@ def run_correlated_scanner():
             correlated_plays.append({
                 'Tier': tier_emoji, 'Player': row['Player_x'], 'Stat': row['Stat'],
                 'Line': line, 'Side': math_side, 'Win%': win_pct,
-                'AI_Proj': ai_proj, 'Score': round(combined_score, 1)
+                'AI_Proj': ai_proj, 'Score': round(combined_score, 1),
+                'FD_Line': row.get('FD_Line', line),
+                'Line_Diff': row.get('Line_Diff', 0.0)
             })
 
     # 4. Display results
     if not correlated_plays:
-        print("❌ No correlated plays found.")
+        print("No correlated plays found.")
     else:
         import unicodedata
 
@@ -250,9 +255,9 @@ def run_correlated_scanner():
 
         # Column widths
         W_RANK=3; W_TIER=4; W_PLAYER=24; W_STAT=5; W_LINE=6
-        W_SIDE=8; W_WIN=7; W_AI=7; W_SCORE=6
+        W_SIDE=8; W_WIN=7; W_AI=7; W_SCORE=6; W_LDIFF=5
         SEP = " │ "
-        total_w = W_RANK+W_TIER+W_PLAYER+W_STAT+W_LINE+W_SIDE+W_WIN+W_AI+W_SCORE + len(SEP)*8
+        total_w = W_RANK+W_TIER+W_PLAYER+W_STAT+W_LINE+W_SIDE+W_WIN+W_AI+W_SCORE+W_LDIFF + len(SEP)*9
 
         def print_table(df, title, limit=None):
             """Print a formatted table of correlated plays."""
@@ -271,7 +276,8 @@ def run_correlated_scanner():
                 pad('SIDE',    W_SIDE)             + SEP +
                 pad('WIN %',   W_WIN,   'right')   + SEP +
                 pad('AI PROJ', W_AI,    'right')   + SEP +
-                pad('SCORE',   W_SCORE, 'right')
+                pad('SCORE',   W_SCORE, 'right')   + SEP +
+                pad('ΔLINE',   W_LDIFF, 'right')
             )
             print(header)
             print(f"{'─'*total_w}")
@@ -282,6 +288,10 @@ def run_correlated_scanner():
                     player = player[:-1]
                 side      = str(row['Side'])
                 side_cell = f"{'▲' if side == 'Over' else '▼'} {side}"
+                ld = float(row.get('Line_Diff', 0))
+                ld_cell = f"{ld:+.1f}" if ld != 0 else "  ="
+                if abs(ld) >= 2.0:
+                    ld_cell = f"⚡{ld_cell}"
                 print(
                     pad(str(i+1),                    W_RANK,  'right') + SEP +
                     pad(tier,                         W_TIER)           + SEP +
@@ -291,7 +301,8 @@ def run_correlated_scanner():
                     pad(side_cell,                    W_SIDE)           + SEP +
                     pad(f"{float(row['Win%']):.2f}%", W_WIN,   'right') + SEP +
                     pad(f"{float(row['AI_Proj']):.2f}",W_AI,   'right') + SEP +
-                    pad(f"{float(row['Score']):.1f}", W_SCORE, 'right')
+                    pad(f"{float(row['Score']):.1f}", W_SCORE, 'right') + SEP +
+                    pad(ld_cell,                      W_LDIFF, 'right')
                 )
             print(f"{'─'*total_w}")
 
@@ -302,7 +313,7 @@ def run_correlated_scanner():
         final_df['Tier'] = final_df['Tier'].replace({'?': '–', '~': '–'})
 
         # ── Main table: overall top 20 ─────────────────────────────────────
-        print_table(final_df, "💎  TOP 20 CORRELATED PLAYS  —  Math + AI Confidence", limit=20)
+        print_table(final_df, "TOP 20 CORRELATED PLAYS  --  Math + AI Confidence", limit=20)
 
         # ── Bonus sections: best play(s) for every market NOT in the top 20 ─
         top20_stats = set(final_df.head(20)['Stat'].unique())
@@ -320,7 +331,7 @@ def run_correlated_scanner():
         }
 
         if missing_stats:
-            print(f"\n  📊  BEST PLAYS BY MARKET  —  markets not in top 20")
+            print(f"\n  BEST PLAYS BY MARKET  --  markets not in top 20")
             for stat in sorted(missing_stats):
                 stat_df = final_df[final_df['Stat'] == stat]
                 if stat_df.empty:
@@ -332,7 +343,7 @@ def run_correlated_scanner():
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         path = os.path.join(OUTPUT_DIR, 'correlated_plays.csv')
         final_df.to_csv(path, index=False)
-        print(f"\n💾 Saved to {path}")
+        print(f"\nSaved to {path}")
 
     input("\nPress Enter to return to menu...")
 
@@ -341,7 +352,7 @@ def run_correlated_scanner():
 def run_odds_scanner():
     print("")
     print("\n" + "="*40)
-    print("   💰 ODDS ARBITRAGE SCANNER")
+    print("   ODDS SCANNER")
     print("="*40)
 
     try:
@@ -350,18 +361,21 @@ def run_odds_scanner():
         pp_df = pp.fetch_board(league_filter='NBA')
         if not pp_df.empty:
             pp_df['Stat'] = pp_df['Stat'].replace(PP_NORMALIZATION_MAP)
-        print(f"✅ Got {len(pp_df)} PrizePicks props.")
+        print(f"Got {len(pp_df)} PrizePicks props.")
 
         print("\n--- 2. Fetching FanDuel Odds ---")
         fd    = FanDuelClient(
             api_key=ODDS_API_KEY, sport_map=SPORT_MAP,
             regions=REGIONS, odds_format=ODDS_FORMAT, stat_map=STAT_MAP
         )
-        fd_df = fd.get_all_odds()
-        print(f"✅ Got {len(fd_df)} FanDuel props.")
+        # Determine the active slate date (handles late-night rollover)
+        _, target_date = get_games(date_offset=0, require_scheduled=True)
+        print(f"   Active slate: {target_date}")
+        fd_df = fd.get_all_odds(target_date=target_date)
+        print(f"Got {len(fd_df)} FanDuel props.")
 
         if pp_df.empty or fd_df.empty:
-            print("\n⚠️  Stopping: One of the data sources is empty.")
+            print("\nStopping: one of the data sources is empty.")
             input("\nPress Enter to return to menu...")
             return
 
@@ -371,18 +385,24 @@ def run_odds_scanner():
 
         if not all_bets.empty:
             sorted_bets = all_bets.sort_values(by='Implied_Win_%', ascending=False)
-            print("\n🔥 TOP 15 HIGHEST PROBABILITY PLAYS:")
-            print(sorted_bets[['Date', 'Player', 'Stat', 'Side', 'Line', 'Implied_Win_%']].head(15).to_string(index=False))
+            print("\nTOP 15 HIGHEST PROBABILITY PLAYS:")
+            display_cols = ['Date', 'Player', 'Stat', 'Side', 'Line']
+            if 'FD_Line' in sorted_bets.columns:
+                display_cols.append('FD_Line')
+            if 'Line_Diff' in sorted_bets.columns:
+                display_cols.append('Line_Diff')
+            display_cols.append('Implied_Win_%')
+            print(sorted_bets[display_cols].head(15).to_string(index=False))
 
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             for game_date in sorted_bets['Date'].unique():
                 day_data = sorted_bets[sorted_bets['Date'] == game_date]
                 day_data.to_csv(os.path.join(OUTPUT_DIR, f"scan_{game_date}.csv"), index=False)
         else:
-            print("❌ No profitable matches found!")
+            print("No profitable matches found.")
 
     except Exception as e:
-        print(f"\n❌ An error occurred: {e}")
+        print(f"\nError: {e}")
 
     input("\nPress Enter to return to menu...")
 
@@ -392,36 +412,174 @@ def run_ai_scanner():
     try:
         ai_scanner_module.main()
     except Exception as e:
-        print(f"❌ Error running AI Scanner: {e}")
+        print(f"Error running AI Scanner: {e}")
         input("Press Enter...")
+
+
+# --- SETUP: BUILD DATA ---
+def run_builder():
+    print("\n" + "=" * 55)
+    print("   BUILD NBA DATA")
+    print("=" * 55)
+    print("Downloads NBA game logs and player history via nba_api")
+    print("")
+    confirm = input("This may take 2-5 minutes. Continue? (y/n): ").strip().lower()
+    if confirm != 'y':
+        return
+    try:
+        from src.sports.nba.builder import fetch_all_game_logs, fetch_player_positions
+        fetch_all_game_logs()
+        fetch_player_positions()
+        print("\nData build complete!")
+        print("   Next: Run 'Engineer Features' then 'Train Models'.")
+    except ImportError as e:
+        print(f"Builder import error: {e}")
+    except Exception as e:
+        print(f"\nBuilder error: {e}")
+    input("\nPress Enter to continue...")
+
+
+def run_feature_engineering():
+    print("\n" + "=" * 55)
+    print("   FEATURE ENGINEERING")
+    print("=" * 55)
+    print("Building features from raw game logs...")
+    print("")
+    try:
+        from src.sports.nba.features import main as features_main
+        features_main()
+        print("\nFeatures built!")
+        print("   Next: Run 'Train Models'.")
+    except ImportError as e:
+        print(f"Features import error: {e}")
+    except Exception as e:
+        print(f"\nError: {e}")
+        import traceback; traceback.print_exc()
+    input("\nPress Enter to continue...")
+
+
+def run_training():
+    print("\n" + "=" * 55)
+    print("   TRAIN NBA MODELS")
+    print("=" * 55)
+    print(f"Training {len(ACTIVE_TARGETS)} XGBoost models...")
+    print("")
+    try:
+        from src.sports.nba.train import train_and_evaluate
+        train_and_evaluate()
+    except ImportError as e:
+        print(f"Train import error: {e}")
+    except Exception as e:
+        print(f"\nTraining error: {e}")
+        import traceback; traceback.print_exc()
+    input("\nPress Enter to continue...")
+
+
+# --- REPORTING ---
+def view_metrics():
+    import pandas as pd
+
+    metrics_path = os.path.join(_BASE, 'models', 'nba', 'model_metrics.csv')
+
+    print("\n" + "=" * 55)
+    print("   NBA MODEL METRICS")
+    print("=" * 55)
+
+    if not os.path.exists(metrics_path):
+        print("No metrics found. Run 'Train Models' first.")
+        input("\nPress Enter to continue...")
+        return
+
+    df = pd.read_csv(metrics_path)
+
+    print(f"\n{'TARGET':<8} {'MAE':>6} {'R²':>6} {'DIR%':>7}")
+    print("-" * 35)
+    for _, row in df.iterrows():
+        print(f"{row['Target']:<8} {row['MAE']:>6.3f} {row['R2']:>6.3f} "
+              f"{row['Directional_Accuracy']:>6.1f}%")
+
+    print("\nMAE  = Mean Absolute Error (lower is better)")
+    print("DIR% = Directional accuracy — did we predict Over/Under correctly")
+    if 'Last_Updated' in df.columns:
+        print(f"\nLast trained: {df['Last_Updated'].iloc[-1]}")
+
+    input("\nPress Enter to continue...")
+
+
+def run_injury_debug():
+    """Test injury report lookups."""
+    print("\n" + "=" * 55)
+    print("   INJURY REPORT")
+    print("=" * 55)
+
+    try:
+        refresh_injuries()
+        from src.sports.nba.injuries import get_injury_report
+        report = get_injury_report()
+        if not report:
+            print("No injuries reported.")
+        else:
+            out_players = [p for p in report if report[p] == 'OUT']
+            gtd_players = [p for p in report if report[p] != 'OUT']
+            print(f"\nOUT ({len(out_players)}):")
+            for p in sorted(out_players)[:20]:
+                print(f"   {p}")
+            if len(out_players) > 20:
+                print(f"   ... and {len(out_players) - 20} more")
+            if gtd_players:
+                print(f"\nGTD / Other ({len(gtd_players)}):")
+                for p in sorted(gtd_players)[:10]:
+                    print(f"   {p}: {report[p]}")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback; traceback.print_exc()
+
+    input("\nPress Enter to continue...")
 
 
 # --- MAIN MENU ---
 def main_menu():
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("")
-        print("\n" + "🏀"*12 + "  SPORTS ANALYTICS HUB  " + "🏀"*12)
-        print("-" * 72)
-        print("\nSelect a Tool:")
-        print("1. 🚀 Super Scanner (Correlated Plays)")
-        print("   -> COMBINES the Odds Scanner and AI Scanner.")
-        print("   -> Shows plays where BOTH the Math and AI agree.")
-        print("\n2. 💰 Odds Scanner (Arbitrage)")
-        print("   -> Compares FanDuel vs PrizePicks for math-based edges.")
-        print("\n3. 🤖 NBA AI Scanner (Predictive Model)")
-        print("   -> Uses your XGBoost models to predict Over/Under.")
-        print("\n0. 🚪 Exit")
 
-        choice = input("\nSelect Option: ").strip()
-        if choice == '1':   run_correlated_scanner()
+        print("\n" + "=" * 55)
+        print("   NBA EV BOT")
+        print("=" * 55)
+        print(f"   {datetime.now().strftime('%A, %B %d, %Y')}")
+        print("=" * 55)
+
+        print("\nANALYSIS")
+        print("1. Super Scanner         -- Math + AI correlated plays")
+        print("2. Odds Scanner          -- FanDuel vs PrizePicks")
+        print("3. AI Scanner            -- Scan / Scout / Grade")
+
+        print("\nSETUP  (run once in order)")
+        print("4. Build Data            -- Download NBA game history")
+        print("5. Engineer Features     -- Build training features")
+        print("6. Train Models          -- Train all 13 XGBoost models")
+
+        print("\nREPORTING")
+        print("7. Model Metrics         -- Accuracy by market")
+        print("8. Injury Report         -- Current injury status")
+
+        print("\n" + "=" * 55)
+        print("0. Back")
+        print("=" * 55)
+
+        choice = input("\nSelect: ").strip()
+
+        if   choice == '1': run_correlated_scanner()
         elif choice == '2': run_odds_scanner()
         elif choice == '3': run_ai_scanner()
-        elif choice == '0':
-            print("\nGoodbye! 👋\n")
-            break
+        elif choice == '4': run_builder()
+        elif choice == '5': run_feature_engineering()
+        elif choice == '6': run_training()
+        elif choice == '7': view_metrics()
+        elif choice == '8': run_injury_debug()
+        elif choice == '0': break
         else:
-            print("Invalid selection.")
+            print("\nInvalid selection.")
+            input("Press Enter to try again...")
 
 
 if __name__ == "__main__":
