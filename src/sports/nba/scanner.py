@@ -12,10 +12,13 @@ Usage:
 import pandas as pd
 import xgboost as xgb
 import os
+import time
 import warnings
 import unicodedata
 import re
 from datetime import datetime, timedelta
+import requests
+
 from nba_api.stats.endpoints import ScoreboardV2, LeagueGameLog
 
 from src.core.odds_providers.prizepicks import PrizePicksClient
@@ -115,6 +118,29 @@ def load_models():
     return models
 
 
+# stats.nba.com is often slow/unreliable - use longer timeout + retries
+NBA_API_TIMEOUT = 90
+NBA_API_RETRIES = 3
+NBA_API_RETRY_DELAY = 8
+
+
+def _fetch_scoreboard(game_date, retries=NBA_API_RETRIES):
+    """Fetch scoreboard with retries and extended timeout (stats.nba.com is flaky)."""
+    for attempt in range(retries):
+        try:
+            board = ScoreboardV2(
+                game_date=game_date, league_id='00', day_offset=0, timeout=NBA_API_TIMEOUT
+            )
+            return board.game_header.get_data_frame()
+        except (requests.exceptions.Timeout, requests.exceptions.ReadTimeout, ConnectionError, OSError) as e:
+            if attempt < retries - 1:
+                print(f"   ⏳ Timeout (attempt {attempt + 1}/{retries}), retrying in {NBA_API_RETRY_DELAY}s...")
+                time.sleep(NBA_API_RETRY_DELAY)
+            else:
+                raise
+    return None
+
+
 def get_games(date_offset=0, require_scheduled=True, max_days_forward=7):
     """
     Fetch games for a specific date, with fallback to search forward.
@@ -149,8 +175,7 @@ def get_games(date_offset=0, require_scheduled=True, max_days_forward=7):
     print(f"...Checking for games on {target_date}")
     
     try:
-        board = ScoreboardV2(game_date=target_date, league_id='00', day_offset=0)
-        games = board.game_header.get_data_frame()
+        games = _fetch_scoreboard(target_date)
         
         if not games.empty:
             if require_scheduled:
@@ -173,8 +198,7 @@ def get_games(date_offset=0, require_scheduled=True, max_days_forward=7):
                 print(f"   Checking {search_date}...", end='\r')
             
             try:
-                board = ScoreboardV2(game_date=search_date, league_id='00', day_offset=0)
-                games = board.game_header.get_data_frame()
+                games = _fetch_scoreboard(search_date)
                 
                 if not games.empty:
                     if require_scheduled:
@@ -443,7 +467,8 @@ def get_actual_stats_for_grading(target_date_obj):
             season=season_str,
             date_from_nullable=date_str,
             date_to_nullable=date_str,
-            player_or_team_abbreviation='P'
+            player_or_team_abbreviation='P',
+            timeout=NBA_API_TIMEOUT
         )
         stats_frames = log.get_data_frames()
         if not stats_frames or stats_frames[0].empty:
