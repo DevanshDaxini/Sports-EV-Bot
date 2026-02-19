@@ -67,7 +67,10 @@ FEATURES = [
     'TS_PCT', 'DAYS_REST', 'IS_HOME',
     'GAMES_7D', 'IS_4_IN_6', 'IS_B2B', 'IS_FRESH',
     'PACE_ROLLING', 'FGA_PER_MIN', 'TOV_PER_USAGE',
-    'USAGE_VACUUM', 'STAR_COUNT'
+    'USAGE_VACUUM', 'STAR_COUNT',
+    # Location splits + opponent context (synced with train.py)
+    'PTS_LOC_MEAN', 'REB_LOC_MEAN', 'AST_LOC_MEAN', 'FG3M_LOC_MEAN', 'PRA_LOC_MEAN',
+    'OPP_WIN_PCT', 'IS_VS_ELITE_TEAM'
 ]
 
 for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
@@ -75,9 +78,11 @@ for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
 
 for stat in ['PTS', 'REB', 'AST', 'FG3M', 'FGA', 'BLK', 'STL', 'TOV', 'FGM', 'FTM', 'FTA']:
     FEATURES.append(f'OPP_{stat}_ALLOWED')
+    FEATURES.append(f'OPP_{stat}_ALLOWED_DIFF')  # DvP Diff (synced with train.py)
 
 for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
     FEATURES.append(f'OPP_{combo}_ALLOWED')
+    FEATURES.append(f'OPP_{combo}_ALLOWED_DIFF')  # DvP Diff (synced with train.py)
 
 
 def normalize_name(name):
@@ -122,9 +127,42 @@ def get_betting_indicator(proj, line):
 def load_data():
     if not os.path.exists(DATA_FILE): return None
     df = pd.read_csv(DATA_FILE)
-    df.columns = [c.strip().upper() for c in df.columns]
+    df.columns = [c.strip() for c in df.columns]
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
     return df
+
+
+# ---------------------------------------------------------------------------
+# DATA CACHING (Optimization)
+# ---------------------------------------------------------------------------
+
+def build_data_cache(df_history):
+    """
+    Pre-indexes the dataframe for O(1) lookups.
+    Returns:
+        latest_rows_map: {pid: row_dict}
+        team_rosters_map: {team_id: [pid, pid, ...]}
+    """
+    print("...Building data cache for fast lookups")
+    
+    # Filter to current season only — prevents traded players from inflating
+    # team rosters (e.g. Deandre Ayton still mapping to the Suns)
+    season_col = 'SEASON_YEAR' if 'SEASON_YEAR' in df_history.columns else 'SEASON_ID'
+    current_season = df_history[season_col].max()
+    df_current = df_history[df_history[season_col] == current_season]
+    print(f"   Using season {current_season} ({df_current['PLAYER_ID'].nunique()} players)")
+    
+    # Sort by date, take latest row per player
+    df_sorted = df_current.sort_values(['PLAYER_ID', 'GAME_DATE'])
+    df_latest = df_sorted.drop_duplicates(subset=['PLAYER_ID'], keep='last')
+    
+    # 1. Latest Rows Map
+    latest_rows_map = df_latest.set_index('PLAYER_ID').to_dict('index')
+    
+    # 2. Team Rosters Map (current season only)
+    team_rosters_map = df_latest.groupby('TEAM_ID')['PLAYER_ID'].apply(list).to_dict()
+    
+    return latest_rows_map, team_rosters_map
 
 
 def load_models():
@@ -191,7 +229,7 @@ def _fetch_scoreboard_cdn(game_date):
     # Fast path: today's games via the live scoreboard
     if target == today:
         try:
-            print(f"   📡 Fetching today's scoreboard from cdn.nba.com...", flush=True)
+            print(f"   Fetching today's scoreboard...", flush=True)
             resp = requests.get(CDN_SCOREBOARD_URL, headers=CDN_HEADERS, timeout=CDN_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
@@ -200,7 +238,7 @@ def _fetch_scoreboard_cdn(game_date):
             if not df.empty:
                 return df
         except Exception as e:
-            print(f"   ⚠️  CDN live scoreboard failed ({type(e).__name__}), trying schedule...", flush=True)
+            print(f"   CDN scoreboard failed, trying schedule...", flush=True)
 
     # Fallback / future dates: use the full schedule
     return _fetch_schedule_cdn(game_date)
@@ -211,7 +249,7 @@ def _fetch_schedule_cdn(game_date):
     from datetime import datetime as _dt
     target = _dt.strptime(game_date, '%Y-%m-%d').date()
     try:
-        print(f"   📡 Fetching schedule from cdn.nba.com...", flush=True)
+        print(f"   Fetching schedule...", flush=True)
         resp = requests.get(CDN_SCHEDULE_URL, headers=CDN_HEADERS, timeout=CDN_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
@@ -226,7 +264,7 @@ def _fetch_schedule_cdn(game_date):
         # Date exists but no games scheduled
         return pd.DataFrame()
     except Exception as e:
-        print(f"   ⚠️  CDN schedule failed ({type(e).__name__})", flush=True)
+        print(f"   CDN schedule failed", flush=True)
         return None
 
 
@@ -235,9 +273,9 @@ def _fetch_scoreboard_statsapi(game_date, retries=NBA_API_RETRIES):
     for attempt in range(retries):
         try:
             if attempt > 0:
-                print(f"   ⏳ Retry {attempt + 1}/{retries} (stats.nba.com)...", flush=True)
+                print(f"   Retry {attempt + 1}/{retries}...", flush=True)
             else:
-                print(f"   📡 Trying stats.nba.com fallback (up to {NBA_API_TIMEOUT}s)...", flush=True)
+                print(f"   Trying stats.nba.com fallback...", flush=True)
             sys.stdout.flush()
             board = ScoreboardV2(
                 game_date=game_date, league_id='00', day_offset=0, timeout=NBA_API_TIMEOUT
@@ -245,7 +283,7 @@ def _fetch_scoreboard_statsapi(game_date, retries=NBA_API_RETRIES):
             return board.game_header.get_data_frame()
         except _REQUEST_ERRORS as e:
             if attempt < retries - 1:
-                print(f"   ⏳ Request failed ({type(e).__name__}), retrying in {NBA_API_RETRY_DELAY}s...", flush=True)
+                print(f"   Request failed, retrying in {NBA_API_RETRY_DELAY}s...", flush=True)
                 time.sleep(NBA_API_RETRY_DELAY)
             else:
                 raise
@@ -262,19 +300,19 @@ def _fetch_scoreboard(game_date, retries=NBA_API_RETRIES):
     try:
         df = _fetch_scoreboard_cdn(game_date)
         if df is not None and not df.empty:
-            print(f"   ✅ Got {len(df)} games from cdn.nba.com", flush=True)
+            print(f"   Got {len(df)} games from cdn.nba.com", flush=True)
             return df
         elif df is not None:
             # CDN responded but no games on this date
             return df
     except Exception as e:
-        print(f"   ⚠️  cdn.nba.com failed ({type(e).__name__}), falling back...", flush=True)
+        print(f"   cdn.nba.com failed, falling back...", flush=True)
 
     # --- Fallback: stats.nba.com ---
     try:
         return _fetch_scoreboard_statsapi(game_date, retries=retries)
     except Exception as e:
-        print(f"   ❌ Both cdn.nba.com and stats.nba.com failed ({type(e).__name__})", flush=True)
+        print(f"   Both cdn.nba.com and stats.nba.com failed", flush=True)
         raise
 
 
@@ -318,10 +356,10 @@ def get_games(date_offset=0, require_scheduled=True, max_days_forward=7):
             if require_scheduled:
                 scheduled_games = games[games['GAME_STATUS_ID'] == 1]
                 if not scheduled_games.empty:
-                    print(f"✅ Found {len(scheduled_games)} scheduled games on {target_date}")
+                    print(f"Found {len(scheduled_games)} scheduled games on {target_date}")
                     return _build_team_map(scheduled_games), target_date
             else:
-                print(f"✅ Found {len(games)} games on {target_date}")
+                print(f"Found {len(games)} games on {target_date}")
                 return _build_team_map(games), target_date
         
         # No games on requested date - search forward
@@ -343,13 +381,13 @@ def get_games(date_offset=0, require_scheduled=True, max_days_forward=7):
                         if not scheduled_games.empty:
                             # Found games!
                             day_name = (initial_date + timedelta(days=days_ahead)).strftime('%A')
-                            print(f"\n✅ Found {len(scheduled_games)} games on {search_date} ({day_name})")
+                            print(f"\nFound {len(scheduled_games)} games on {search_date} ({day_name})")
                             print(f"   📅 That's {days_ahead} day{'s' if days_ahead > 1 else ''} from now")
                             return _build_team_map(scheduled_games), search_date
                     else:
                         if not games.empty:
                             day_name = (initial_date + timedelta(days=days_ahead)).strftime('%A')
-                            print(f"\n✅ Found {len(games)} games on {search_date} ({day_name})")
+                            print(f"\nFound {len(games)} games on {search_date} ({day_name})")
                             return _build_team_map(games), search_date
             
             except Exception as e:
@@ -357,7 +395,7 @@ def get_games(date_offset=0, require_scheduled=True, max_days_forward=7):
                 continue
         
         # No games found in entire search window
-        print(f"\n❌ No scheduled games found in the next {max_days_forward} days")
+        print(f"\nNo scheduled games found in the next {max_days_forward} days")
         return {}, None
         
     except Exception as e:
@@ -392,15 +430,11 @@ def _build_team_map(games_df):
 # UPDATED scan_all FUNCTION (to use the new return format)
 # ============================================================================
 
-def scan_all(df_history, models, is_tomorrow=False):
+def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
     """
-    Batch analysis of all games, with automatic forward search.
+    Batch analysis of all games, with automatic forward search (optional).
     
-    Changes:
-        - Now handles the (team_map, date) tuple from get_games
-        - Shows which date was actually used for scanning
-        - Updates save filename if using future date
-        - Refreshes injury report before each scan for accurate projections
+    OPTIMIZED: Uses pre-built dictionaries for O(1) lookups instead of O(N) DataFrame filtering.
     """
     refresh_injuries()
     offset = 1 if is_tomorrow else 0
@@ -409,11 +443,11 @@ def scan_all(df_history, models, is_tomorrow=False):
     todays_teams, actual_date = get_games(
         date_offset=offset,
         require_scheduled=True,
-        max_days_forward=7
+        max_days_forward=max_days_forward
     )
     
     if not todays_teams:
-        print("❌ No scheduled games found in the next 7 days.")
+        print("No scheduled games found in the next 7 days.")
         input("\nPress Enter to continue...")
         return
     
@@ -423,49 +457,51 @@ def scan_all(df_history, models, is_tomorrow=False):
         day_name = scan_date_obj.strftime('%A, %B %d, %Y')
         print(f"\n📅 Scanning games for: {day_name}")
     
-    print("\n🚀 Fetching Live PrizePicks Lines...")
+    print("\nFetching PrizePicks lines...")
     pp_client = PrizePicksClient(stat_map=STAT_MAP)
     live_lines = pp_client.fetch_lines_dict(league_filter='NBA')
 
-    # ✅ DEBUG: Show what we got
     if live_lines:
-        print(f"   ✅ Loaded {len(live_lines)} players from PrizePicks")
-        sample_player = list(live_lines.keys())[0]
-        sample_stats = live_lines[sample_player]
-        print(f"   Example: {sample_player} - {list(sample_stats.keys())[:5]}")
+        print(f"   Loaded {len(live_lines)} players from PrizePicks")
     else:
-        print("   ⚠️  Got empty response from PrizePicks")
+        print("   Warning: empty response from PrizePicks")
 
     norm_lines = {normalize_name(k): v for k, v in live_lines.items()}
 
-    print("🚀 Scanning Markets...")
+    print("Building data cache & scanning markets...")
+    # --- PRE-BUILD CACHE (O(N) once) ---
+    latest_rows_map, team_rosters_map = build_data_cache(df_history)
+
     best_bets = []
     all_projections = []
 
     for team_id, info in todays_teams.items():
-        team_players = df_history[df_history['TEAM_ID'] == team_id]['PLAYER_ID'].unique()
+        # O(1) Lookup for roster
+        team_players = team_rosters_map.get(team_id, [])
 
         # Calculate missing usage (injured players)
         missing_usage_today = 0.0
         for pid in team_players:
-            p_rows = df_history[df_history['PLAYER_ID'] == pid].sort_values('GAME_DATE')
-            if p_rows.empty: continue
-            last_row = p_rows.iloc[-1]
-            if get_player_status(last_row['PLAYER_NAME']) == 'OUT':
-                usage = last_row.get('USAGE_RATE_SEASON', 0)
+            # O(1) Lookup for player data
+            last_row = latest_rows_map.get(pid)
+            if not last_row: continue
+            
+            pname = last_row['PLAYER_NAME']
+            if get_player_status(pname) == 'OUT':
+                usage = last_row.get('USAGE_RATE_Season', 0)
                 if usage > 15:
                     missing_usage_today += usage
 
         # Generate predictions for each player
         for pid in team_players:
-            p_rows = df_history[df_history['PLAYER_ID'] == pid].sort_values('GAME_DATE')
-            if p_rows.empty: continue
-            last_row = p_rows.iloc[-1]
+            last_row = latest_rows_map.get(pid)
+            if not last_row: continue
+            
             player_name = last_row['PLAYER_NAME']
 
             if get_player_status(player_name) == 'OUT':
                 continue
-
+                
             input_row = prepare_features(
                 last_row,
                 is_home=info['is_home'],
@@ -473,15 +509,27 @@ def scan_all(df_history, models, is_tomorrow=False):
             )
 
             player_predictions = {}
+            features_ok = True
 
             for target, model in models.items():
-                model_features = [f for f in model.feature_names_in_ if target not in f]
-                valid_input = input_row.reindex(columns=model_features, fill_value=0)
-                proj = float(model.predict(valid_input)[0])
-                player_predictions[target] = proj
+                if not features_ok: break
+                try:
+                    # Filter for features actually used by THIS model
+                    model_features = [f for f in model.feature_names_in_ if target not in f]
+                    valid_input = input_row.reindex(columns=model_features, fill_value=0)
+                    proj = float(model.predict(valid_input)[0])
+                    player_predictions[target] = proj
+                except Exception:
+                    # Model mismatch or missing features
+                    features_ok = False
+            
+            if not features_ok: continue
 
             # --- Injury redistribution adjustments ---
-            inj_adj = _calculate_injury_adjustments(df_history, team_id, pid)
+            # Pass the cache to avoid re-filtering inside
+            inj_adj = _calculate_injury_adjustments_fast(
+                latest_rows_map, team_players, pid
+            )
             for stat, adj_val in inj_adj.items():
                 if stat in player_predictions:
                     player_predictions[stat] += adj_val
@@ -521,14 +569,18 @@ def scan_all(df_history, models, is_tomorrow=False):
             for target, proj in player_predictions.items():
                 line = norm_lines.get(normalize_name(player_name), {}).get(target)
                 rec = get_betting_indicator(proj, line)
+                
+                # Default empty pp/edge if no line
+                pp_val   = round(line, 2) if line else 0
+                edge_val = round(proj - line, 2) if line else 0
 
                 all_projections.append({
                     'REC': rec,
                     'NAME': player_name,
                     'TARGET': target,
                     'AI': round(proj, 2),
-                    'PP': round(line, 2) if line else 0,
-                    'EDGE': round(proj - line, 2) if line else 0
+                    'PP': pp_val,
+                    'EDGE': edge_val
                 })
 
                 if line is not None and line > 0:
@@ -562,7 +614,7 @@ def scan_all(df_history, models, is_tomorrow=False):
                 seen.add(key)
                 deduped_bets.append(bet)
         
-        print(f"   🧹 Removed {len(best_bets) - len(deduped_bets)} duplicate entries")
+        print(f"   Removed {len(best_bets) - len(deduped_bets)} duplicate entries")
         
         # Sort by tier and edge
         tier_order = {'ELITE': 0, 'STRONG': 1, 'DECENT': 2, 'RISKY': 3, 'AVOID': 4}
@@ -574,13 +626,32 @@ def scan_all(df_history, models, is_tomorrow=False):
             return 99
         deduped_bets.sort(key=lambda x: (_tier_key(x), -abs(x['PCT_EDGE'])))
         
-        # Take top 10 after deduplication
-        top_overs  = [b for b in deduped_bets if b['EDGE'] > 0][:10]
-        top_unders = [b for b in deduped_bets if b['EDGE'] < 0][:10]
+        # Take top 10 with market diversity — ensure every stat type is covered
+        def _diverse_top(bets, n=10):
+            """Pick best bet per market first, then fill to n."""
+            if len(bets) <= n:
+                return bets[:n]
+            by_market = {}
+            for b in bets:
+                t = b['TARGET']
+                if t not in by_market or abs(b['PCT_EDGE']) > abs(by_market[t]['PCT_EDGE']):
+                    by_market[t] = b
+            result = list(by_market.values())
+            seen = {(x['NAME'], x['TARGET'], x['PP']) for x in result}
+            for b in bets:
+                key = (b['NAME'], b['TARGET'], b['PP'])
+                if key not in seen and len(result) < n:
+                    result.append(b)
+                    seen.add(key)
+            result.sort(key=lambda x: (_tier_key(x), -abs(x['PCT_EDGE'])))
+            return result[:n]
+
+        top_overs  = _diverse_top([b for b in deduped_bets if b['EDGE'] > 0])
+        top_unders = _diverse_top([b for b in deduped_bets if b['EDGE'] < 0])
 
         # Table format — consistent column widths, spacing, separator
         sep = "-" * 73
-        print("\n🔥 TOP 10 OVERS (Highest Value)")
+        print("\n  TOP 10 OVERS (Highest Value)")
         print()
         print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<5} | {'AI vs PP':<15} | {'EDGE %':<8}")
         print(sep)
@@ -588,7 +659,7 @@ def scan_all(df_history, models, is_tomorrow=False):
             print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<5} | "
                   f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}%")
 
-        print("\n❄️ TOP 10 UNDERS (Lowest Value)")
+        print("\n  TOP 10 UNDERS (Lowest Value)")
         print()
         print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<5} | {'AI vs PP':<15} | {'EDGE %':<8}")
         print(sep)
@@ -603,52 +674,11 @@ def scan_all(df_history, models, is_tomorrow=False):
             save_path = TOMORROW_SCAN_FILE if is_tomorrow else TODAY_SCAN_FILE
 
         pd.DataFrame(all_projections).to_csv(save_path, index=False)
-        print(f"\n✅ Full analysis ({len(all_projections)} rows) saved to {save_path}")
+        print(f"\nFull analysis ({len(all_projections)} rows) saved to {save_path}")
     else:
-        print("\n⚠️ No active lines found.")
+        print("\nNo active lines found.")
 
     input("\nPress Enter to continue...")
-
-
-def get_actual_stats_for_grading(target_date_obj):
-    date_str = target_date_obj.strftime('%m/%d/%Y')
-    if target_date_obj.month >= 10:
-        season_str = f"{target_date_obj.year}-{str(target_date_obj.year + 1)[-2:]}"
-    else:
-        season_str = f"{target_date_obj.year - 1}-{str(target_date_obj.year)[-2:]}"
-    print(f"...Fetching results for {date_str} (Season {season_str})...")
-    try:
-        log = LeagueGameLog(
-            season=season_str,
-            date_from_nullable=date_str,
-            date_to_nullable=date_str,
-            player_or_team_abbreviation='P',
-            timeout=NBA_API_TIMEOUT
-        )
-        stats_frames = log.get_data_frames()
-        if not stats_frames or stats_frames[0].empty:
-            print("⚠️ No completed games found for this date.")
-            return {}
-        stats = stats_frames[0]
-        print(f"   ✅ Loaded stats for {len(stats)} players.")
-        player_stats = {}
-        for _, row in stats.iterrows():
-            name = normalize_name(row['PLAYER_NAME'])
-            pts, reb, ast = row['PTS'], row['REB'], row['AST']
-            blk, stl, tov = row['BLK'], row['STL'], row['TOV']
-            fg3m, fgm, fga = row['FG3M'], row['FGM'], row['FGA']
-            ftm, fta = row['FTM'], row['FTA']
-            player_stats[name] = {
-                'PTS': pts, 'REB': reb, 'AST': ast,
-                'FG3M': fg3m, 'BLK': blk, 'STL': stl, 'TOV': tov,
-                'FGM': fgm, 'FGA': fga, 'FTM': ftm, 'FTA': fta,
-                'PRA': pts + reb + ast, 'PR': pts + reb, 'PA': pts + ast,
-                'RA': reb + ast, 'SB': stl + blk
-            }
-        return player_stats
-    except Exception as e:
-        print(f"API Error: {e}")
-        return {}
 
 
 def prepare_features(player_row, is_home=0, days_rest=2, missing_usage=0):
@@ -661,13 +691,73 @@ def prepare_features(player_row, is_home=0, days_rest=2, missing_usage=0):
 
 
 # --- STAT COLUMNS used for injury redistribution ---
-# NOTE: load_data() uppercases all columns, so use UPPERCASE here
+# NOTE: Column names match the training CSV (mixed case from features.py)
 _STAT_SEASON_COLS = {
-    'PTS': 'PTS_SEASON', 'REB': 'REB_SEASON', 'AST': 'AST_SEASON',
-    'FG3M': 'FG3M_SEASON', 'FGM': 'FGM_SEASON', 'FGA': 'FGA_SEASON',
-    'FG3A': 'FG3A_SEASON', 'FTM': 'FTM_SEASON', 'FTA': 'FTA_SEASON',
-    'STL': 'STL_SEASON', 'BLK': 'BLK_SEASON', 'TOV': 'TOV_SEASON',
+    'PTS': 'PTS_Season', 'REB': 'REB_Season', 'AST': 'AST_Season',
+    'FG3M': 'FG3M_Season', 'FGM': 'FGM_Season', 'FGA': 'FGA_Season',
+    'FG3A': 'FG3A_Season', 'FTM': 'FTM_Season', 'FTA': 'FTA_Season',
+    'STL': 'STL_Season', 'BLK': 'BLK_Season', 'TOV': 'TOV_Season',
 }
+
+
+def _calculate_injury_adjustments_fast(latest_rows_map, team_players, active_pid):
+    """
+    Optimized version of injury adjustments using pre-computed cache.
+    """
+    # --- Gather last-row data for every teammate ---
+    out_production = {}       # stat -> total missing production
+    active_usage   = {}       # pid  -> usage rate (for active players)
+
+    for pid in team_players:
+        last = latest_rows_map.get(pid)
+        if not last: continue
+        
+        pname = last['PLAYER_NAME']
+        usage = last.get('USAGE_RATE_Season', 0)
+
+        if get_player_status(pname) == 'OUT':
+            # Accumulate missing production
+            for stat, col in _STAT_SEASON_COLS.items():
+                val = last.get(col, 0)
+                # Check for nan/None
+                if val and val > 0:
+                     out_production[stat] = out_production.get(stat, 0) + val
+        else:
+            if usage > 0:
+                active_usage[pid] = usage
+
+    if not out_production or active_pid not in active_usage:
+        return {}  # nothing to adjust
+
+    # --- Redistribute proportionally by usage share ---
+    total_active_usage = sum(active_usage.values())
+    if total_active_usage == 0: return {}
+    
+    player_share = active_usage[active_pid] / total_active_usage
+
+    adjustments = {}
+    for stat, missing_total in out_production.items():
+        rate = ABSORPTION_RATES.get(stat, 0.40)
+        adj  = missing_total * player_share * rate
+        if abs(adj) > 0.01:
+            adjustments[stat] = round(adj, 2)
+
+    # Derive combo-stat adjustments from components
+    pts_adj = adjustments.get('PTS', 0)
+    reb_adj = adjustments.get('REB', 0)
+    ast_adj = adjustments.get('AST', 0)
+    stl_adj = adjustments.get('STL', 0)
+    blk_adj = adjustments.get('BLK', 0)
+
+    if pts_adj or reb_adj or ast_adj:
+        adjustments['PRA'] = round(pts_adj + reb_adj + ast_adj, 2)
+        adjustments['PR']  = round(pts_adj + reb_adj, 2)
+        adjustments['PA']  = round(pts_adj + ast_adj, 2)
+        adjustments['RA']  = round(reb_adj + ast_adj, 2)
+    if stl_adj or blk_adj:
+        adjustments['SB'] = round(stl_adj + blk_adj, 2)
+
+    return adjustments
 
 
 def _calculate_injury_adjustments(df_history, team_id, active_pid):
@@ -687,7 +777,10 @@ def _calculate_injury_adjustments(df_history, team_id, active_pid):
         dict  {stat: adjustment_value, ...}
               e.g. {'PTS': +2.31, 'REB': +1.80, 'AST': +0.42, ...}
     """
-    team_df = df_history[df_history['TEAM_ID'] == team_id]
+    # Filter to current season to avoid counting traded players
+    season_col = 'SEASON_YEAR' if 'SEASON_YEAR' in df_history.columns else 'SEASON_ID'
+    current_season = df_history[season_col].max()
+    team_df = df_history[(df_history[season_col] == current_season) & (df_history['TEAM_ID'] == team_id)]
     all_pids = team_df['PLAYER_ID'].unique()
 
     # --- Gather last-row data for every teammate ---
@@ -700,7 +793,7 @@ def _calculate_injury_adjustments(df_history, team_id, active_pid):
             continue
         last = p_rows.iloc[-1]
         pname = last['PLAYER_NAME']
-        usage = last.get('USAGE_RATE_SEASON', 0)
+        usage = last.get('USAGE_RATE_Season', 0)
 
         if get_player_status(pname) == 'OUT':
             # Accumulate missing production
@@ -744,104 +837,8 @@ def _calculate_injury_adjustments(df_history, team_id, active_pid):
     return adjustments
 
 
-def grade_results():
-    print("\n📅 GRADING OPTIONS:")
-    print("1. Grade TODAY'S Games")
-    print("2. Grade YESTERDAY'S Games")
-    choice = input("Select (1/2): ").strip()
-    target_date = datetime.now() - timedelta(days=1) if choice == '2' else datetime.now()
-    print(f"\n📅 Grading {target_date.strftime('%Y-%m-%d')}")
-
-    if not os.path.exists(TODAY_SCAN_FILE):
-        print("❌ No scan file found. Run Option 1 first.")
-        return
-
-    try:
-        df_preds = pd.read_csv(TODAY_SCAN_FILE)
-    except:
-        print("❌ Error reading prediction file.")
-        return
-
-    actuals = get_actual_stats_for_grading(target_date)
-    if not actuals:
-        print("\n❌ Stats unavailable. Games may not be finished.")
-        return
-
-    print("\n" + "="*65)
-    print("📝 RESULTS ANALYSIS")
-    print("="*65)
-
-    results      = []
-    total_graded = 0
-    correct_picks = 0
-
-    for _, row in df_preds.iterrows():
-        if row['PP'] == 0: continue
-        name      = normalize_name(row['NAME'])
-        target    = row['TARGET']
-        line      = float(row['PP'])
-        rec_text  = row['REC']
-        if name not in actuals: continue
-        actual_val = actuals[name].get(target)
-        if actual_val is None: continue
-        pick_type = "NONE"
-        if "OVER"  in rec_text: pick_type = "OVER"
-        elif "UNDER" in rec_text: pick_type = "UNDER"
-        else: continue
-        is_win = False
-        margin = 0
-        if pick_type == "OVER":
-            margin = actual_val - line
-            if actual_val > line:  is_win = True
-            elif actual_val == line: is_win = "PUSH"
-        elif pick_type == "UNDER":
-            margin = line - actual_val
-            if actual_val < line:  is_win = True
-            elif actual_val == line: is_win = "PUSH"
-        if is_win != "PUSH":
-            total_graded += 1
-            if is_win: correct_picks += 1
-            results.append({
-                'Player': row['NAME'], 'Stat': target, 'Pick': pick_type,
-                'Line': line, 'Actual': actual_val, 'Margin': margin, 'Win': is_win
-            })
-
-    if total_graded == 0:
-        print("⚠️ Predictions found, but no matching player stats (check date?).")
-        return
-
-    sorted_results = sorted(results, key=lambda x: x['Margin'], reverse=True)
-    top_wins     = [r for r in sorted_results if r['Win']][:5]
-    worst_losses = sorted([r for r in sorted_results if not r['Win']], key=lambda x: x['Margin'])[:5]
-
-    print("\n🏆 TOP 5 BEST WINS")
-    print(f"{'PLAYER':<20} | {'STAT':<5} | {'PICK':<5} | {'LINE':<5} | {'ACTUAL':<6} | MARGIN")
-    print("-" * 70)
-    for r in top_wins:
-        print(f"{r['Player']:<20} | {r['Stat']:<5} | {r['Pick']:<5} | {r['Line']:<5} | {r['Actual']:<6} | 🟢 +{r['Margin']:.1f}")
-
-    print("\n💀 TOP 5 WORST LOSSES")
-    print(f"{'PLAYER':<20} | {'STAT':<5} | {'PICK':<5} | {'LINE':<5} | {'ACTUAL':<6} | MARGIN")
-    print("-" * 70)
-    for r in worst_losses:
-        print(f"{r['Player']:<20} | {r['Stat']:<5} | {r['Pick']:<5} | {r['Line']:<5} | {r['Actual']:<6} | 🔴 {r['Margin']:.1f}")
-
-    accuracy = (correct_picks / total_graded) * 100
-    print("-" * 70)
-    print(f"📊 FINAL ACCURACY: {accuracy:.1f}% ({correct_picks}/{total_graded})")
-
-    os.makedirs(PROJ_DIR, exist_ok=True)
-    log_exists = os.path.exists(ACCURACY_LOG_FILE)
-    with open(ACCURACY_LOG_FILE, 'a') as f:
-        if not log_exists:
-            f.write("Date,Graded,Correct,Accuracy,Best_Win_Margin\n")
-        f.write(f"{target_date.strftime('%Y-%m-%d')},{total_graded},{correct_picks},{accuracy:.2f},{top_wins[0]['Margin'] if top_wins else 0}\n")
-    print(f"✅ Results logged to {ACCURACY_LOG_FILE}")
-    input("\nPress Enter to continue...")
-
-
 def scout_player(df_history, models):
-    print("\n🔎 --- PLAYER SCOUT ---")
+    print("\n--- PLAYER SCOUT ---")
     refresh_injuries()
     d_choice = input("Select Start Date (1=Today, 2=Tomorrow): ").strip()
     offset = 1 if d_choice == '2' else 0
@@ -854,7 +851,7 @@ def scout_player(df_history, models):
     )
     
     if not todays_teams:
-        print("❌ No scheduled games found in the next 7 days.")
+        print("No scheduled games found in the next 7 days.")
         return
 
     # Display the date being scouted
@@ -862,6 +859,70 @@ def scout_player(df_history, models):
     print(f"\n📅 Scouting for games on: {scan_date_obj.strftime('%A, %B %d, %Y')}")
 
     pp_client  = PrizePicksClient(stat_map=STAT_MAP)
+
+    # --- Load FanDuel cache from disk (NO API call) ---
+    import json, math
+    fd_cache_file = os.path.join('fanduel_cache', 'fanduel_cache_nba.json')
+    fd_odds_by_player = {}   # {normalized_name: {stat_code: {'over': odds, 'under': odds, 'line': float}}}
+    fd_cache_age_str = "N/A"
+
+    # Reverse map: FanDuel display name -> scanner target code
+    _FD_TO_CODE = {
+        'Points': 'PTS', 'Rebounds': 'REB', 'Assists': 'AST',
+        '3-Pt Made': 'FG3M', 'Pts+Rebs+Asts': 'PRA', 'Pts+Rebs': 'PR',
+        'Pts+Asts': 'PA', 'Rebs+Asts': 'RA', 'Blks+Stls': 'SB',
+        'Blocks': 'BLK', 'Steals': 'STL', 'Turnovers': 'TOV',
+        'Field Goals Made': 'FGM', 'Free Throws Made': 'FTM',
+        'Free Throws Attempted': 'FTA', 'Field Goals Attempted': 'FGA',
+    }
+
+    if os.path.exists(fd_cache_file):
+        try:
+            cache_age_mins = (time.time() - os.path.getmtime(fd_cache_file)) / 60
+            if cache_age_mins < 60:
+                fd_cache_age_str = f"{int(cache_age_mins)} min(s) ago"
+            else:
+                fd_cache_age_str = f"{cache_age_mins / 60:.1f} hr(s) ago"
+            with open(fd_cache_file, 'r') as f:
+                fd_raw = json.load(f)
+            for entry in fd_raw:
+                p_name = normalize_name(entry.get('Player', ''))
+                raw_stat = entry.get('Stat', '')
+                stat_code = _FD_TO_CODE.get(raw_stat, raw_stat)
+                side = entry.get('Side', '')
+                odds = entry.get('Odds', 0)
+                line = entry.get('Line', 0)
+                if not p_name or not stat_code:
+                    continue
+                if p_name not in fd_odds_by_player:
+                    fd_odds_by_player[p_name] = {}
+                if stat_code not in fd_odds_by_player[p_name]:
+                    fd_odds_by_player[p_name][stat_code] = {'over': 0, 'under': 0, 'line': line}
+                if side == 'Over':
+                    fd_odds_by_player[p_name][stat_code]['over'] = odds
+                elif side == 'Under':
+                    fd_odds_by_player[p_name][stat_code]['under'] = odds
+            print(f"   FanDuel cache loaded ({len(fd_odds_by_player)} players, {fd_cache_age_str})")
+        except Exception as e:
+            print(f"   Warning: could not load FanDuel cache: {e}")
+    else:
+        print("   No FanDuel cache found -- run Odds Scanner first to populate it")
+
+    # Helper: calculate vig-removed true probability from American odds
+    def _odds_to_prob(odds):
+        if odds < 0:
+            return (-odds) / ((-odds) + 100)
+        else:
+            return 100 / (odds + 100)
+
+    # Line adjustment factors (same as analyzer.py)
+    _LINE_ADJ = {
+        'PTS': 0.035, 'PRA': 0.025, 'PR': 0.030, 'PA': 0.030,
+        'REB': 0.040, 'AST': 0.045, 'RA': 0.035,
+        'FG3M': 0.055, 'STL': 0.060, 'BLK': 0.060, 'SB': 0.055,
+        'TOV': 0.045, 'FGM': 0.040, 'FGA': 0.040, 'FTM': 0.050, 'FTA': 0.050,
+    }
+
     scouting   = True
 
     while scouting:
@@ -873,11 +934,11 @@ def scout_player(df_history, models):
         try:
             matches = df_history[df_history['PLAYER_NAME'].str.lower().str.contains(query)]
         except Exception as e:
-            print(f"❌ Search error: {e}")
+            print(f"Search error: {e}")
             continue
 
         if matches.empty:
-            print(f"❌ No players found matching '{query}'.")
+            print(f"No players found matching '{query}'.")
             continue
 
         unique_players = matches[['PLAYER_ID', 'PLAYER_NAME']].drop_duplicates()
@@ -887,21 +948,21 @@ def scout_player(df_history, models):
                 pid = int(input("Enter PLAYER_ID: "))
                 matches = matches[matches['PLAYER_ID'] == pid]
                 if matches.empty:
-                    print(f"❌ No data found for PLAYER_ID {pid}.")
+                    print(f"No data found for PLAYER_ID {pid}.")
                     continue
             except ValueError:
-                print("❌ Invalid PLAYER_ID.")
+                print("Invalid PLAYER_ID.")
                 continue
 
-        # Fetch lines for the identified date
-        print(f"...Fetching PrizePicks lines")
-        live_lines = pp_client.fetch_lines_dict(league_filter='NBA')
-        norm_lines = {normalize_name(k): v for k, v in live_lines.items()}
+        # Fetch lines for the identified date (includes goblin/demon alt lines)
+        print("Fetching PrizePicks lines...")
+        live_lines_full = pp_client.fetch_lines_with_type(league_filter='NBA')
+        norm_lines_full = {normalize_name(k): v for k, v in live_lines_full.items()}
 
         try:
             player_data = matches.sort_values('GAME_DATE').iloc[-1]
         except IndexError:
-            print("❌ No recent history found for this player.")
+            print("No recent history found for this player.")
             continue
 
         name    = player_data['PLAYER_NAME']
@@ -909,35 +970,61 @@ def scout_player(df_history, models):
         
         # Check if the player's team is in the team_map for the 'actual_date'
         if team_id not in todays_teams:
-            print(f"⚠️ {name} is not scheduled to play on {actual_date}.")
+            print(f"{name} is not scheduled to play on {actual_date}.")
             continue
 
         is_home = todays_teams[team_id]['is_home']
 
-        # Calculate injury impact for the target date
-        team_players = df_history[df_history['TEAM_ID'] == team_id]['PLAYER_ID'].unique()
+        # Calculate injury impact for the target date (current season only)
+        season_col = 'SEASON_YEAR' if 'SEASON_YEAR' in df_history.columns else 'SEASON_ID'
+        current_season = df_history[season_col].max()
+        df_current = df_history[(df_history[season_col] == current_season) & (df_history['TEAM_ID'] == team_id)]
+        team_players = df_current['PLAYER_ID'].unique()
         missing_usage_today = 0.0
         for pid in team_players:
-            p_rows = df_history[df_history['PLAYER_ID'] == pid].sort_values('GAME_DATE')
+            p_rows = df_current[df_current['PLAYER_ID'] == pid].sort_values('GAME_DATE')
             if p_rows.empty: continue
             last_row = p_rows.iloc[-1]
             if get_player_status(last_row['PLAYER_NAME']) == 'OUT':
-                usage = last_row.get('USAGE_RATE_SEASON', 0)
+                usage = last_row.get('USAGE_RATE_Season', 0)
                 if usage > 15: missing_usage_today += usage
 
-        print(f"\n📊 SCOUTING REPORT: {name} ({actual_date})")
-        print(f"🚑 Team Injury Impact: {missing_usage_today:.1f}% Missing Usage")
+        print(f"\nSCOUTING REPORT: {name} ({actual_date})")
+        print(f"Injury Impact: {missing_usage_today:.1f}% Missing Usage")
 
         # Calculate injury adjustments for this player
         pid_for_adj = matches.sort_values('GAME_DATE').iloc[-1]['PLAYER_ID']
         inj_adj = _calculate_injury_adjustments(df_history, team_id, pid_for_adj)
         if inj_adj:
-            print(f"📈 Injury Boost: adjustments applied for {len(inj_adj)} stats")
+            print(f"Injury Boost: adjustments for {len(inj_adj)} stats")
 
-        print(f"{'TIER':<6} | {'MARKET':<8} | {'PROJ':<14} | {'LINE':<8} | RECOMMENDATION")
-        print("-" * 85)
+        # Show FanDuel cache age
+        print(f"FanDuel odds: cached {fd_cache_age_str}")
+
+        import unicodedata
+        def _term_width(s):
+            """Terminal display width of a string (handles emojis correctly)."""
+            w = 0
+            for ch in s:
+                cat = unicodedata.category(ch)
+                if cat in ('Mn', 'Me', 'Cf'):   # zero-width: marks, variation selectors
+                    continue
+                eaw = unicodedata.east_asian_width(ch)
+                w += 2 if eaw in ('W', 'F') else 1
+            return w
+
+        TIER_WIDTH = 4  # desired terminal cols for tier column
+
+        # (G) = goblin alt line, (D) = demon alt line
+        print()
+        print(f" TIER | STAT | {'PROJ':<14} | {'LINE':^11} | {'WIN%':>6} | SIDE")
+        print("-" * 78)
 
         input_row = prepare_features(player_data, is_home=is_home, missing_usage=missing_usage_today)
+
+        # Lookup FanDuel odds and PrizePicks lines for this player
+        player_fd = fd_odds_by_player.get(normalize_name(name), {})
+        player_pp = norm_lines_full.get(normalize_name(name), {})
 
         for target in TARGETS:
             if target in models:
@@ -947,14 +1034,72 @@ def scout_player(df_history, models):
                 base_pred     = float(models[target].predict(valid_input)[0])
                 adj           = inj_adj.get(target, 0)
                 pred          = base_pred + adj
-                line          = norm_lines.get(normalize_name(name), {}).get(target)
-                indicator     = get_betting_indicator(pred, line)
-                line_str      = f"{line:.2f}" if line else "N/A"
-                if abs(adj) > 0.01:
-                    proj_str  = f"{pred:<5.2f} (+{adj:.1f})"
+
+                # Get PP line with type info
+                pp_info = player_pp.get(target)
+                line      = pp_info['line'] if pp_info else None
+                line_type = pp_info['type'] if pp_info else None
+
+                # Format line string — fixed 11 chars wide
+                if line is not None:
+                    num_str = f"{line:.2f}"
+                    if line_type == 'goblin':
+                        line_str = f"{num_str:>6} (G) "
+                    elif line_type == 'demon':
+                        line_str = f"{num_str:>6} (D) "
+                    else:
+                        line_str = f"{num_str:>6}     "
                 else:
-                    proj_str  = f"{pred:<5.2f}      "
-                print(f"{tier_emoji:<6} | {target:<8} : {proj_str:<14} | {line_str:<8} | {indicator}")
+                    line_str = "     --    "
+
+                # --- Calculate WIN% from FanDuel odds — fixed 6 chars ---
+                win_pct_str = "    --"
+                if line is not None and target in player_fd:
+                    fd_info = player_fd[target]
+                    fd_over_odds = fd_info['over']
+                    fd_under_odds = fd_info['under']
+                    fd_line = fd_info['line']
+                    if fd_over_odds != 0 and fd_under_odds != 0:
+                        prob_o = _odds_to_prob(fd_over_odds)
+                        prob_u = _odds_to_prob(fd_under_odds)
+                        total = prob_o + prob_u
+                        true_over = prob_o / total
+                        true_under = prob_u / total
+                        # Adjust for PP vs FD line difference
+                        line_diff = line - fd_line
+                        if line_diff != 0:
+                            factor = _LINE_ADJ.get(target, 0.035)
+                            adjustment = factor * math.log(1 + abs(line_diff)) / math.log(2)
+                            if line_diff < 0:
+                                true_over = min(true_over + adjustment, 0.90)
+                                true_under = max(true_under - adjustment, 0.10)
+                            else:
+                                true_over = max(true_over - adjustment, 0.10)
+                                true_under = min(true_under + adjustment, 0.90)
+                            norm = true_over + true_under
+                            true_over /= norm
+                            true_under /= norm
+                        # Show the win% for the projected side
+                        if pred > line:
+                            win_pct_str = f"{true_over * 100:5.1f}%"
+                        else:
+                            win_pct_str = f"{true_under * 100:5.1f}%"
+
+                # --- ▲/▼ indicator ---
+                if line is None or line <= 0:
+                    side_str = "--"
+                else:
+                    diff = pred - line
+                    if diff > 0:
+                        side_str = f"▲ Over (+{diff:.2f})"
+                    else:
+                        side_str = f"▼ Under ({diff:.2f})"
+
+                # Pad tier to fixed terminal width
+                pad           = " " * max(0, TIER_WIDTH - _term_width(tier_emoji))
+                tier_col      = tier_emoji + pad
+                proj_str = f"{pred:>6.2f}       "
+                print(f" {tier_col}| {target:<4} | {proj_str:<14} | {line_str} | {win_pct_str} | {side_str}")
 
         if input("\nScout another player? (y/n): ").lower() != 'y':
             scouting = False
@@ -966,21 +1111,19 @@ def main():
     df     = load_data()
     models = load_models()
     if df is None or not models:
-        print("❌ Setup failed.")
+        print("Setup failed.")
         return
 
     while True:
-        print("\n" + "="*30 + "\n   🤖 NBA AI SCANNER\n" + "="*30)
-        print("1. 🚀 Scan TODAY'S Games")
-        print("2. 🔮 Scan TOMORROW'S Games")
-        print("3. 📝 Grade Results")
-        print("4. 🔎 Scout Specific Player")
-        print("0. 🚪 Exit")
+        print("\n" + "="*30 + "\n   NBA AI SCANNER\n" + "="*30)
+        print("1. Scan TODAY's Games")
+        print("2. Scan NEXT Match")
+        print("3. Scout Specific Player")
+        print("0. Exit")
         choice = input("\nSelect: ").strip()
-        if choice == '1':   scan_all(df, models, is_tomorrow=False)
-        elif choice == '2': scan_all(df, models, is_tomorrow=True)
-        elif choice == '3': grade_results()
-        elif choice == '4': scout_player(df, models)
+        if choice == '1':   scan_all(df, models, is_tomorrow=False, max_days_forward=0)
+        elif choice == '2': scan_all(df, models, is_tomorrow=True, max_days_forward=7)
+        elif choice == '3': scout_player(df, models)
         elif choice == '0': break
 
 
