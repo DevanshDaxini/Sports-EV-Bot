@@ -30,3 +30,6 @@ prizepicks_cache/
 # OS
 .DS_Store
 Thumbs.db
+
+# src/sports
+src/sports/nba/tune_train.py
