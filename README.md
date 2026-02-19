@@ -1,4 +1,4 @@
-# sports_ev_bot
+# Sports EV Bot
 
 A multi-sport prop betting analysis engine. Uses XGBoost regression models trained on historical data to project player stats, then compares those projections against PrizePicks lines and FanDuel odds to find positive expected value (+EV) opportunities.
 
