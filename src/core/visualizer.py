@@ -42,7 +42,8 @@ def plot_individual_model_accuracy():
     df = df.sort_values('Directional_Accuracy', ascending=False)
 
     plt.figure(figsize=(14, 7))
-    colors = ['#2ecc71' if x >= 85 else '#f1c40f' if x >= 75 else '#e74c3c' for x in df['Directional_Accuracy']]
+    # 60%+ is elite in sports betting, 54.1% is breakeven
+    colors = ['#2ecc71' if x >= 60 else '#f1c40f' if x >= 54.1 else '#e74c3c' for x in df['Directional_Accuracy']]
     bars = plt.bar(df['Target'], df['Directional_Accuracy'], color=colors)
     plt.axhline(y=54.1, color='black', linestyle='--', linewidth=1.5, label='PP Breakeven (54.1%)')
     plt.title('Individual Model Accuracy (Directional Win %)', fontsize=16, fontweight='bold')
