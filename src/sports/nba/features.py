@@ -64,7 +64,7 @@ def add_rolling_features(df):
     df = df.copy()
     df['CAREER_GAMES'] = df.groupby('PLAYER_ID').cumcount() + 1
     grouped = df.groupby('PLAYER_ID')
-    base_stats = ['PTS', 'REB', 'AST', 'FG3M', 'STL', 'BLK', 'TOV', 'FGM', 'FTM']
+    base_stats = ['PTS', 'REB', 'AST', 'FG3M', 'STL', 'BLK', 'TOV', 'FGM', 'FGA', 'FTM', 'FTA']
     stats_to_roll = base_stats + ['MIN', 'GAME_SCORE', 'USAGE_RATE']
     for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
         if combo in df.columns:

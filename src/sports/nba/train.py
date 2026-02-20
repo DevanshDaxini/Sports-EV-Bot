@@ -40,7 +40,9 @@ FEATURES = [
     'BLK_L5', 'BLK_L10', 'BLK_L20', 'BLK_Season', 'BLK_L5_Median', 'BLK_L10_Median',
     'TOV_L5', 'TOV_L10', 'TOV_L20', 'TOV_Season', 'TOV_L5_Median', 'TOV_L10_Median',
     'FGM_L5', 'FGM_L10', 'FGM_L20', 'FGM_Season', 'FGM_L5_Median', 'FGM_L10_Median',
+    'FGA_L5', 'FGA_L10', 'FGA_L20', 'FGA_Season', 'FGA_L5_Median', 'FGA_L10_Median',
     'FTM_L5', 'FTM_L10', 'FTM_L20', 'FTM_Season', 'FTM_L5_Median', 'FTM_L10_Median',
+    'FTA_L5', 'FTA_L10', 'FTA_L20', 'FTA_Season', 'FTA_L5_Median', 'FTA_L10_Median',
     'MIN_L5', 'MIN_L10', 'MIN_L20', 'MIN_Season', 'MIN_L5_Median', 'MIN_L10_Median',
     'GAME_SCORE_L5', 'GAME_SCORE_L10', 'GAME_SCORE_L20', 'GAME_SCORE_Season', 'GAME_SCORE_L5_Median', 'GAME_SCORE_L10_Median',
     'USAGE_RATE_L5', 'USAGE_RATE_L10', 'USAGE_RATE_L20', 'USAGE_RATE_Season', 'USAGE_RATE_L5_Median', 'USAGE_RATE_L10_Median',
@@ -113,10 +115,7 @@ def train_and_evaluate():
             print(f" -> SKIPPING {target} (Column not found in data)")
             continue
 
-        features_to_use = [f for f in FEATURES if target not in f]
-
-        if len(features_to_use) < 10:
-            print(f" -> WARNING: Only {len(features_to_use)} features after filtering for {target}")
+        features_to_use = FEATURES
 
         X_train = train_df[features_to_use]
         y_train = train_df[target]
