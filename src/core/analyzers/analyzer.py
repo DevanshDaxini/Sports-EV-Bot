@@ -3,14 +3,13 @@ Props Edge Analyzer - FanDuel vs PrizePicks Comparison
 
 NOW WITH LINE-ADJUSTED WIN% CALCULATION!
 
-Calculates "true probability" by removing bookmaker vig from FanDuel odds,
+Calculates implied probability from FanDuel odds,
 THEN adjusts for PrizePicks line differences to show YOUR actual win rate.
 
 Mathematical Approach:
     1. Convert FanDuel Over/Under odds to implied probabilities
-    2. Remove vig: true_prob = implied_prob / (sum of both sides)
-    3. Adjust probability based on PP vs FD line difference
-    4. Return opportunities with ADJUSTED win rates
+    2. Adjust probability based on PP vs FD line difference
+    3. Return opportunities with ADJUSTED win rates
     
 Example (NEW):
     FanDuel: LeBron 26.5 Points, Over -120, Under +100
@@ -20,15 +19,11 @@ Example (NEW):
         prob_over = 120/220 = 54.5%
         prob_under = 100/200 = 50.0%
         
-    Step 2: Remove vig
-        market_total = 54.5% + 50.0% = 104.5% (vig = 4.5%)
-        true_over = 54.5% / 104.5% = 52.2%
-        
-    Step 3: Adjust for line difference
+    Step 2: Adjust for line difference
         Line diff = 25.5 - 26.5 = -1.0 (PP is 1 point easier)
         For OVER: easier line = higher win probability
         Adjustment = +3.5% per point for PTS
-        Adjusted WIN% = 52.2% + 3.5% = 55.7%
+        Adjusted WIN% = 54.5% + 3.5% = 58.0%
         
 Usage:
     from src.core.analyzers.analyzer import PropsAnalyzer
@@ -242,14 +237,14 @@ class PropsAnalyzer:
 
     def _calculate_true_probability(self, over_odds, under_odds):
         """
-        Remove bookmaker vig to get true probability.
+        Get implied probability without removing bookmaker vig.
         
         Args:
             over_odds (int): American odds for Over (e.g., -120)
             under_odds (int): American odds for Under (e.g., +100)
             
         Returns:
-            tuple: (true_over_prob, true_under_prob)
+            tuple: (implied_over_prob, implied_under_prob)
         """
         def odds_to_prob(odds):
             if odds < 0:
@@ -259,11 +254,8 @@ class PropsAnalyzer:
 
         prob_over = odds_to_prob(over_odds)
         prob_under = odds_to_prob(under_odds)
-        market_total = prob_over + prob_under
-        true_over_prob = prob_over / market_total
-        true_under_prob = prob_under / market_total
 
-        return true_over_prob, true_under_prob
+        return prob_over, prob_under
 
     def _adjust_for_line_difference(self, true_over, true_under, line_diff, stat):
         """
