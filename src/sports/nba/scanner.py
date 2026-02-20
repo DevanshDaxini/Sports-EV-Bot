@@ -682,7 +682,7 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
 
 
 def prepare_features(player_row, is_home=0, days_rest=2, missing_usage=0):
-    features = {col: player_row.get(col, 0) for col in FEATURES}
+    features = player_row.to_dict()
     features['IS_HOME']       = 1 if is_home else 0
     features['DAYS_REST']     = days_rest
     features['IS_B2B']        = 1 if days_rest == 1 else 0

@@ -32,22 +32,22 @@ TARGETS = [
 ]
 
 FEATURES = [
-    'PTS_L5', 'PTS_L20', 'PTS_Season',
-    'REB_L5', 'REB_L20', 'REB_Season',
-    'AST_L5', 'AST_L20', 'AST_Season',
-    'FG3M_L5', 'FG3M_L20', 'FG3M_Season',
-    'STL_L5', 'STL_L20', 'STL_Season',
-    'BLK_L5', 'BLK_L20', 'BLK_Season',
-    'TOV_L5', 'TOV_L20', 'TOV_Season',
-    'FGM_L5', 'FGM_L20', 'FGM_Season',
-    'FTM_L5', 'FTM_L20', 'FTM_Season',
-    'MIN_L5', 'MIN_L20', 'MIN_Season',
-    'GAME_SCORE_L5', 'GAME_SCORE_L20', 'GAME_SCORE_Season',
-    'USAGE_RATE_L5', 'USAGE_RATE_L20', 'USAGE_RATE_Season',
+    'PTS_L5', 'PTS_L10', 'PTS_L20', 'PTS_Season', 'PTS_L5_Median', 'PTS_L10_Median',
+    'REB_L5', 'REB_L10', 'REB_L20', 'REB_Season', 'REB_L5_Median', 'REB_L10_Median',
+    'AST_L5', 'AST_L10', 'AST_L20', 'AST_Season', 'AST_L5_Median', 'AST_L10_Median',
+    'FG3M_L5', 'FG3M_L10', 'FG3M_L20', 'FG3M_Season', 'FG3M_L5_Median', 'FG3M_L10_Median',
+    'STL_L5', 'STL_L10', 'STL_L20', 'STL_Season', 'STL_L5_Median', 'STL_L10_Median',
+    'BLK_L5', 'BLK_L10', 'BLK_L20', 'BLK_Season', 'BLK_L5_Median', 'BLK_L10_Median',
+    'TOV_L5', 'TOV_L10', 'TOV_L20', 'TOV_Season', 'TOV_L5_Median', 'TOV_L10_Median',
+    'FGM_L5', 'FGM_L10', 'FGM_L20', 'FGM_Season', 'FGM_L5_Median', 'FGM_L10_Median',
+    'FTM_L5', 'FTM_L10', 'FTM_L20', 'FTM_Season', 'FTM_L5_Median', 'FTM_L10_Median',
+    'MIN_L5', 'MIN_L10', 'MIN_L20', 'MIN_Season', 'MIN_L5_Median', 'MIN_L10_Median',
+    'GAME_SCORE_L5', 'GAME_SCORE_L10', 'GAME_SCORE_L20', 'GAME_SCORE_Season', 'GAME_SCORE_L5_Median', 'GAME_SCORE_L10_Median',
+    'USAGE_RATE_L5', 'USAGE_RATE_L10', 'USAGE_RATE_L20', 'USAGE_RATE_Season', 'USAGE_RATE_L5_Median', 'USAGE_RATE_L10_Median',
     'MISSING_USAGE',
-    'TS_PCT', 'DAYS_REST', 'IS_HOME',
+    'DAYS_REST', 'IS_HOME',
     'GAMES_7D', 'IS_4_IN_6', 'IS_B2B', 'IS_FRESH',
-    'PACE_ROLLING', 'FGA_PER_MIN', 'TOV_PER_USAGE',
+    'PACE_ROLLING',
     'USAGE_VACUUM', 'STAR_COUNT',
     # NEW FEATURES
     'PTS_LOC_MEAN', 'REB_LOC_MEAN', 'AST_LOC_MEAN', 'FG3M_LOC_MEAN', 'PRA_LOC_MEAN',
@@ -55,7 +55,7 @@ FEATURES = [
 ]
 
 for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
-    FEATURES.extend([f'{combo}_L5', f'{combo}_L20', f'{combo}_Season'])
+    FEATURES.extend([f'{combo}_L5', f'{combo}_L10', f'{combo}_L20', f'{combo}_Season', f'{combo}_L5_Median', f'{combo}_L10_Median'])
 
 for stat in ['PTS', 'REB', 'AST', 'FG3M', 'FGA', 'BLK', 'STL', 'TOV', 'FGM', 'FTM', 'FTA']:
     FEATURES.append(f'OPP_{stat}_ALLOWED')

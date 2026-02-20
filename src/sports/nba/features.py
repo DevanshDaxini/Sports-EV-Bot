@@ -71,9 +71,15 @@ def add_rolling_features(df):
             stats_to_roll.append(combo)
     rolling_data = {}
     for stat in stats_to_roll:
+        # Averages
         rolling_data[f'{stat}_L5']     = grouped[stat].transform(lambda x: x.shift(1).rolling(5, min_periods=3).mean())
+        rolling_data[f'{stat}_L10']    = grouped[stat].transform(lambda x: x.shift(1).rolling(10, min_periods=5).mean())
         rolling_data[f'{stat}_L20']    = grouped[stat].transform(lambda x: x.shift(1).rolling(20, min_periods=10).mean())
         rolling_data[f'{stat}_Season'] = grouped[stat].transform(lambda x: x.shift(1).expanding(min_periods=1).mean())
+        
+        # Medians (Fixes recency bias outlilers)
+        rolling_data[f'{stat}_L5_Median'] = grouped[stat].transform(lambda x: x.shift(1).rolling(5, min_periods=3).median())
+        rolling_data[f'{stat}_L10_Median'] = grouped[stat].transform(lambda x: x.shift(1).rolling(10, min_periods=5).median())
     df = pd.concat([df, pd.DataFrame(rolling_data, index=df.index)], axis=1)
     return df
 
