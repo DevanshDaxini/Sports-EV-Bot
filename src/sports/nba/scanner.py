@@ -55,6 +55,7 @@ FEATURES = [
     'REB_L5', 'REB_L20', 'REB_Season',
     'AST_L5', 'AST_L20', 'AST_Season',
     'FG3M_L5', 'FG3M_L20', 'FG3M_Season',
+    'FG3A_L5', 'FG3A_L20', 'FG3A_Season',
     'STL_L5', 'STL_L20', 'STL_Season',
     'BLK_L5', 'BLK_L20', 'BLK_Season',
     'TOV_L5', 'TOV_L20', 'TOV_Season',
