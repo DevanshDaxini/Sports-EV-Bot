@@ -95,26 +95,39 @@ def normalize_name(name):
     return " ".join(clean.lower().split())
 
 
-def get_player_status(name):
+def get_player_status(name, injury_data=None):
     """
     Check if player is on injury report. Uses exact match + last-name fallback
     (ESPN may use 'Patrick Williams' while our data has 'Patrick Williams II').
     """
+    if injury_data is None:
+        injury_data = INJURY_DATA
+        
     norm_name = normalize_name(name)
-    for injured_name, status in INJURY_DATA.items():
+    for injured_name, status in injury_data.items():
         if normalize_name(injured_name) == norm_name:
             return status
+            
     # Fallback: last-name match when exactly one injured player shares that last name
     parts = norm_name.split()
     if len(parts) >= 2:
         last_name = parts[-1]
         matches = [
-            s for inj_name, s in INJURY_DATA.items()
+            s for inj_name, s in injury_data.items()
             if normalize_name(inj_name).split()[-1] == last_name
         ]
         if len(matches) == 1:
             return matches[0]
     return "Active"
+
+
+def prepare_features(player_row, is_home=0, days_rest=2, missing_usage=0):
+    features = player_row.to_dict()
+    features['IS_HOME']       = 1 if is_home else 0
+    features['DAYS_REST']     = days_rest
+    features['IS_B2B']        = 1 if days_rest == 1 else 0
+    features['MISSING_USAGE'] = missing_usage
+    return pd.DataFrame([features])
 
 
 def get_betting_indicator(proj, line):

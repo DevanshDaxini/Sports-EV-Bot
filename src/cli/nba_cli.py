@@ -86,7 +86,7 @@ def get_ai_predictions():
             if p_rows.empty:
                 continue
             last_row = p_rows.iloc[-1]
-            if get_player_status(last_row['PLAYER_NAME']) == 'OUT':
+            if get_player_status(last_row['PLAYER_NAME'], ai_scanner_module.INJURY_DATA) == 'OUT':
                 usage = last_row.get('USAGE_RATE_Season', 0)
                 if usage > 15:
                     missing_usage_today += usage
@@ -99,7 +99,7 @@ def get_ai_predictions():
             player_name = last_row['PLAYER_NAME']
 
             # Skip injured (OUT) players — no projection for them
-            if get_player_status(player_name) == 'OUT':
+            if get_player_status(player_name, ai_scanner_module.INJURY_DATA) == 'OUT':
                 continue
 
             input_row = prepare_features(
