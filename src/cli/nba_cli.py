@@ -22,7 +22,7 @@ from src.core.odds_providers.fanduel    import FanDuelClient
 from src.core.analyzers.analyzer        import PropsAnalyzer
 from src.sports.nba.config import (
     ODDS_API_KEY, SPORT_MAP, REGIONS, ODDS_FORMAT, STAT_MAP,
-    MODEL_QUALITY, ACTIVE_TARGETS
+    MODEL_QUALITY, ACTIVE_TARGETS, print_mode_info
 )
 from src.sports.nba.train import LOG_TRANSFORM_TARGETS
 from src.sports.nba.scanner import LOG_CALIBRATION
@@ -30,7 +30,7 @@ from src.sports.nba.mappings import PP_NORMALIZATION_MAP, STAT_MAPPING, VOLATILI
 import src.sports.nba.scanner as ai_scanner_module
 from src.sports.nba.scanner import (
     load_data, load_models, get_games, prepare_features, normalize_name,
-    refresh_injuries, get_player_status
+    refresh_injuries, get_player_status, auto_refresh_data
 )
 
 warnings.filterwarnings('ignore')
@@ -44,6 +44,8 @@ OUTPUT_DIR = os.path.join(_BASE, 'output', 'nba', 'scans')
 def get_ai_predictions():
     refresh_injuries()  # Fresh injury data for accurate projections
     df_history = load_data()
+    if df_history is not None:
+        df_history = auto_refresh_data(df_history)
     models     = load_models()
 
     if df_history is None or not models:
@@ -348,7 +350,6 @@ def run_correlated_scanner():
         # ── Build the full sorted frame ────────────────────────────────────
         final_df = pd.DataFrame(correlated_plays)
         final_df = final_df.sort_values(by='Score', ascending=False)
-        final_df = final_df.drop_duplicates(subset=['Player', 'Stat', 'Line', 'Side'], keep='first')
         final_df = final_df.drop_duplicates(subset=['Player', 'Stat', 'Line', 'Side'], keep='first')
 
         # ── Main table: overall top 20 ─────────────────────────────────────
@@ -751,6 +752,7 @@ def main_menu():
         print("=" * 55)
         print(f"   {datetime.now().strftime('%A, %B %d, %Y')}")
         print("=" * 55)
+        print_mode_info()
 
         print("\nANALYSIS")
         print("1. Super Scanner         -- Math + AI correlated plays")

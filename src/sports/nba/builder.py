@@ -80,7 +80,7 @@ def fetch_all_game_logs():
                 if attempt < max_retries - 1:
                     time.sleep(2)
                 else:
-                    print(f"❌ Error fetching {season} after {max_retries} attempts.")
+                    print(f"❌ Error fetching {season} after {max_retries} attempts: {e}")
 
     if all_logs:
         master_df = pd.concat(all_logs, ignore_index=True)
@@ -127,7 +127,7 @@ def fetch_1h_game_logs():
                 if attempt < max_retries - 1:
                     time.sleep(2)
                 else:
-                    print(f"❌ Error fetching 1H {season} after {max_retries} attempts.")
+                    print(f"❌ Error fetching 1H {season} after {max_retries} attempts: {e}")
 
     if all_logs:
         master_df = pd.concat(all_logs, ignore_index=True)
@@ -148,16 +148,19 @@ def fetch_1h_game_logs():
         print("FAILED: No 1H data found.")
 
 
-def fetch_player_positions():
+def fetch_player_positions(force_refresh=False):
     """
     Download current player positions (G, F, C) for all 30 teams.
-    
+
+    Args:
+        force_refresh: If True, re-download even if file exists (use after trades).
+
     Output:
         data/nba/processed/player_positions.csv
     """
     os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 
-    if os.path.exists(POSITION_FILE):
+    if os.path.exists(POSITION_FILE) and not force_refresh:
         print(f"Positions file found at {POSITION_FILE}. Skipping download.")
         return
 
@@ -191,7 +194,7 @@ def fetch_player_positions():
                 if attempt < max_retries - 1:
                     time.sleep(1)
                 else:
-                    print(f"❌ Failed after {max_retries} attempts.")
+                    print(f"❌ Failed after {max_retries} attempts: {e}")
 
     if all_rosters:
         master_roster = pd.concat(all_rosters, ignore_index=True)

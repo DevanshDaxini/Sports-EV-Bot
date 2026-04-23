@@ -30,8 +30,13 @@ import os
 # Disk cache config  (mirrors fanduel.py pattern)
 # ---------------------------------------------------------------------------
 CACHE_DIR              = 'prizepicks_cache'
-CACHE_FILE             = os.path.join(CACHE_DIR, 'prizepicks_cache.json')
 CACHE_DURATION_MINUTES = 2
+
+
+def _cache_file_for_league(league_filter):
+    """Return per-league cache path to prevent cross-sport contamination."""
+    tag = (league_filter or 'all').upper().replace(' ', '_')
+    return os.path.join(CACHE_DIR, f'prizepicks_cache_{tag}.json')
 
 
 class PrizePicksClient:
@@ -139,7 +144,7 @@ class PrizePicksClient:
             Returns empty DataFrame on any failure.
         """
         # --- 1. Try disk cache first ---
-        cached = self._load_cache()
+        cached = self._load_cache(league_filter)
         if cached is not None:
             df = pd.DataFrame(cached)
             if not include_alts and 'OddsType' in df.columns:
@@ -209,7 +214,7 @@ class PrizePicksClient:
             return pd.DataFrame()
 
         # --- 7. Save ALL lines to disk cache (including alts) ---
-        self._save_cache(clean_lines)
+        self._save_cache(clean_lines, league_filter)
 
         df = pd.DataFrame(clean_lines)
         if not include_alts and 'OddsType' in df.columns:
@@ -401,15 +406,16 @@ class PrizePicksClient:
     # Disk cache (30-minute TTL)
     # -----------------------------------------------------------------------
 
-    def _load_cache(self):
+    def _load_cache(self, league_filter=None):
         """Return cached data list if fresh, else None."""
-        if not os.path.exists(CACHE_FILE):
+        cache_file = _cache_file_for_league(league_filter)
+        if not os.path.exists(cache_file):
             return None
         try:
-            age_mins = (time.time() - os.path.getmtime(CACHE_FILE)) / 60
+            age_mins = (time.time() - os.path.getmtime(cache_file)) / 60
             if age_mins < CACHE_DURATION_MINUTES:
                 print(f"   Using cached PP data ({int(age_mins)}m ago, expires in {int(CACHE_DURATION_MINUTES - age_mins)}m)")
-                with open(CACHE_FILE, 'r') as f:
+                with open(cache_file, 'r') as f:
                     return json.load(f)
             else:
                 print(f"   PP cache expired ({int(age_mins)}m old) — fetching fresh")
@@ -418,13 +424,14 @@ class PrizePicksClient:
             print(f"   Warning: could not read PP cache: {e}")
             return None
 
-    def _save_cache(self, data_list):
-        """Save raw lines list to disk."""
+    def _save_cache(self, data_list, league_filter=None):
+        """Save raw lines list to disk under a per-league cache file."""
+        cache_file = _cache_file_for_league(league_filter)
         try:
             os.makedirs(CACHE_DIR, exist_ok=True)
-            with open(CACHE_FILE, 'w') as f:
+            with open(cache_file, 'w') as f:
                 json.dump(data_list, f)
-            print(f"   PP data cached to '{CACHE_FILE}'")
+            print(f"   PP data cached to '{cache_file}'")
         except Exception as e:
             print(f"   Warning: could not save PP cache: {e}")
 

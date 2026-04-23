@@ -221,7 +221,7 @@ def _derive_stat_column(player_logs, stat):
     return stat
 
 
-def calculate_hit_rates(df_history, player_id, stat, line):
+def calculate_hit_rates(df_history, player_id, stat, line, player_logs_index=None):
     """
     Calculate L5, L10, L20 hit rates against a specific line for a player.
     Returns: (l5_rate, l10_rate, l20_rate) as floats between 0.0 and 1.0.
@@ -229,8 +229,11 @@ def calculate_hit_rates(df_history, player_id, stat, line):
     if line is None or line <= 0:
         return 0.0, 0.0, 0.0
 
-    # Get player's history sorted by date
-    player_logs = df_history[df_history['PLAYER_ID'] == player_id].sort_values('GAME_DATE').copy()
+    # Use pre-built index for O(1) lookup; fall back to O(N) filter if not provided
+    if player_logs_index is not None:
+        player_logs = player_logs_index.get(player_id, pd.DataFrame()).copy()
+    else:
+        player_logs = df_history[df_history['PLAYER_ID'] == player_id].sort_values('GAME_DATE').copy()
 
     # Derive stat column if needed (handles FPTS, 1H stats, combos)
     if _derive_stat_column(player_logs, stat) is None:
@@ -259,17 +262,18 @@ def calculate_hit_rates(df_history, player_id, stat, line):
     return l5_rate, l10_rate, l20_rate
 
 
-def calculate_h2h_hit_rate(df_history, player_id, stat, line, opp_abbr):
+def calculate_h2h_hit_rate(df_history, player_id, stat, line, opp_abbr, player_logs_index=None):
     """
     Calculate hit rate against a specific opponent (head-to-head).
     Limited to the last 2 seasons to keep data relevant.
 
     Args:
-        df_history: Full game log DataFrame
-        player_id:  Player's NBA ID
-        stat:       Stat column name (e.g. 'PTS', 'PRA_1H', 'FPTS')
-        line:       PrizePicks line value
-        opp_abbr:   Opponent team abbreviation (e.g. 'BOS')
+        df_history:        Full game log DataFrame
+        player_id:         Player's NBA ID
+        stat:              Stat column name (e.g. 'PTS', 'PRA_1H', 'FPTS')
+        line:              PrizePicks line value
+        opp_abbr:          Opponent team abbreviation (e.g. 'BOS')
+        player_logs_index: Optional pre-built {pid: sorted_df} for O(1) lookup
 
     Returns:
         (h2h_rate, h2h_count): over-rate and number of H2H games found
@@ -277,7 +281,10 @@ def calculate_h2h_hit_rate(df_history, player_id, stat, line, opp_abbr):
     if line is None or line <= 0 or not opp_abbr:
         return 0.0, 0
 
-    player_logs = df_history[df_history['PLAYER_ID'] == player_id].sort_values('GAME_DATE').copy()
+    if player_logs_index is not None:
+        player_logs = player_logs_index.get(player_id, pd.DataFrame()).copy()
+    else:
+        player_logs = df_history[df_history['PLAYER_ID'] == player_id].sort_values('GAME_DATE').copy()
 
     if 'MATCHUP' not in player_logs.columns or player_logs.empty:
         return 0.0, 0
@@ -328,8 +335,12 @@ def analyze_player_availability(df_history, player_id, scan_date_str):
     scan_date = pd.to_datetime(scan_date_str) if scan_date_str else pd.to_datetime(datetime.now().strftime('%Y-%m-%d'))
     
     # --- 1. Identify Team Schedule ---
-    team_id = player_logs['TEAM_ID'].iloc[-1]
-    team_dates = df_history[df_history['TEAM_ID'] == team_id]['GAME_DATE'].drop_duplicates().sort_values()
+    # Use all teams the player appeared for in the current season to handle trades correctly.
+    season_col = 'SEASON_YEAR' if 'SEASON_YEAR' in player_logs.columns else 'SEASON_ID'
+    current_season = player_logs[season_col].max()
+    current_season_logs = player_logs[player_logs[season_col] == current_season]
+    current_team_ids = current_season_logs['TEAM_ID'].unique() if not current_season_logs.empty else [player_logs['TEAM_ID'].iloc[-1]]
+    team_dates = df_history[df_history['TEAM_ID'].isin(current_team_ids)]['GAME_DATE'].drop_duplicates().sort_values()
     
     # --- 2. Current missed team games ---
     last_game_date = player_logs['GAME_DATE'].iloc[-1]
@@ -525,9 +536,11 @@ def auto_refresh_data(df_history):
             if attempt > 0:
                 _log(f"   Retry {attempt + 1}/3 (timeout={timeout}s)...")
                 time.sleep(3)
+            date_from = (latest_date + pd.Timedelta(days=1)).strftime('%m/%d/%Y')
             logs = playergamelogs.PlayerGameLogs(
                 season_nullable='2025-26',
                 league_id_nullable='00',
+                date_from_nullable=date_from,
                 timeout=timeout
             )
             api_df = logs.get_data_frames()[0]
@@ -554,6 +567,7 @@ def auto_refresh_data(df_history):
                 season_nullable='2025-26',
                 league_id_nullable='00',
                 game_segment_nullable='First Half',
+                date_from_nullable=date_from,
                 timeout=timeout
             )
             api_1h_df = logs_1h.get_data_frames()[0]
@@ -635,58 +649,56 @@ def auto_refresh_data(df_history):
         combined = combined.drop_duplicates(subset=['PLAYER_ID', 'GAME_ID'], keep='first')
         combined = combined.sort_values(['PLAYER_ID', 'GAME_DATE']).reset_index(drop=True)
 
-        # Recompute rolling stats for all players who have new data
+        # Recompute rolling stats with vectorized groupby.transform — eliminates O(P×S) Python loops
         updated_pids = new_rows['PLAYER_ID'].unique()
-        _log(f"   🔄 Recomputing rolling stats for {len(updated_pids)} players...")
+        _log(f"   🔄 Recomputing rolling stats (vectorized, {len(updated_pids)} updated players)...")
 
         base_stats = ['PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL', 'BLK', 'TOV',
                       'FGM', 'FGA', 'FTM', 'FTA', 'MIN', 'PRA', 'PR', 'PA', 'RA', 'SB', 'FPTS',
                       'PTS_1H', 'REB_1H', 'AST_1H', 'FG3M_1H', 'STL_1H', 'BLK_1H', 'TOV_1H',
                       'FGM_1H', 'FGA_1H', 'FTM_1H', 'FTA_1H', 'MIN_1H', 'PRA_1H', 'FPTS_1H',
                       'NBA_FANTASY_PTS_1H', 'FG3A_1H']
-        # Only compute for stats that exist
         base_stats = [s for s in base_stats if s in combined.columns]
 
+        # combined is already sorted by [PLAYER_ID, GAME_DATE] — required for correct rolling
+        for stat in base_stats:
+            _tmp = '__tmp'
+            combined[_tmp] = combined[stat].copy()
+            if '_1H' in stat:
+                # 0s in 1H cols mean "no 1H box score available" — treat as NaN to avoid dilution
+                combined[_tmp] = combined[_tmp].replace(0, float('nan'))
+            grp = combined.groupby('PLAYER_ID')[_tmp]
+            combined[f'{stat}_L5']         = grp.transform(lambda x: x.rolling(5,  min_periods=1).mean())
+            combined[f'{stat}_L10']        = grp.transform(lambda x: x.rolling(10, min_periods=1).mean())
+            combined[f'{stat}_L20']        = grp.transform(lambda x: x.rolling(20, min_periods=1).mean())
+            combined[f'{stat}_Season']     = grp.transform(lambda x: x.expanding().mean())
+            combined[f'{stat}_L5_Median']  = grp.transform(lambda x: x.rolling(5,  min_periods=1).median())
+            combined[f'{stat}_L10_Median'] = grp.transform(lambda x: x.rolling(10, min_periods=1).median())
+            combined.drop(columns=[_tmp], inplace=True)
+
+        # GAME_SCORE and USAGE_RATE are derived stats — recompute only for updated players
+        gs_cols = ['PTS', 'FGM', 'FGA', 'FTM', 'FTA', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'PF']
         for pid in updated_pids:
             mask = combined['PLAYER_ID'] == pid
-            player_df = combined.loc[mask].sort_values('GAME_DATE')
+            player_df = combined.loc[mask]
 
-            for stat in base_stats:
-                if stat not in player_df.columns:
-                    continue
-                vals = player_df[stat]
-                # 1H stats are 0 in auto-refresh rows that lack 1H box scores.
-                # Treat those 0s as NaN so they're excluded from rolling averages
-                # instead of diluting them (e.g. Tatum PTS_1H_L20 = 2.45 vs real ~13).
-                if '_1H' in stat:
-                    vals = vals.replace(0, float('nan'))
-                combined.loc[mask, f'{stat}_L5'] = vals.rolling(5, min_periods=1).mean().values
-                combined.loc[mask, f'{stat}_L10'] = vals.rolling(10, min_periods=1).mean().values
-                combined.loc[mask, f'{stat}_L20'] = vals.rolling(20, min_periods=1).mean().values
-                combined.loc[mask, f'{stat}_Season'] = vals.expanding().mean().values
-                combined.loc[mask, f'{stat}_L5_Median'] = vals.rolling(5, min_periods=1).median().values
-                combined.loc[mask, f'{stat}_L10_Median'] = vals.rolling(10, min_periods=1).median().values
-
-            # Recompute GAME_SCORE if PTS and other stats are available
-            if all(c in player_df.columns for c in ['PTS', 'FGM', 'FGA', 'FTM', 'FTA', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'PF']):
+            if all(c in player_df.columns for c in gs_cols):
                 gs = (player_df['PTS'] + 0.4 * player_df['FGM'] - 0.7 * player_df['FGA']
                       - 0.4 * (player_df['FTA'] - player_df['FTM']) + 0.7 * player_df['OREB'].fillna(0)
                       + 0.3 * player_df['DREB'].fillna(0) + player_df['STL']
                       + 0.7 * player_df['AST'] + 0.7 * player_df['BLK']
                       - 0.4 * player_df['PF'] - player_df['TOV'])
-                combined.loc[mask, 'GAME_SCORE'] = gs.values
-                combined.loc[mask, 'GAME_SCORE_L5'] = gs.rolling(5, min_periods=1).mean().values
-                combined.loc[mask, 'GAME_SCORE_L10'] = gs.rolling(10, min_periods=1).mean().values
+                combined.loc[mask, 'GAME_SCORE']        = gs.values
+                combined.loc[mask, 'GAME_SCORE_L5']     = gs.rolling(5,  min_periods=1).mean().values
+                combined.loc[mask, 'GAME_SCORE_L10']    = gs.rolling(10, min_periods=1).mean().values
                 combined.loc[mask, 'GAME_SCORE_Season'] = gs.expanding().mean().values
 
-            # Recompute USAGE_RATE approximation
             if all(c in player_df.columns for c in ['FGA', 'FTA', 'TOV', 'MIN']):
-                mins = player_df['MIN'].replace(0, 1)
-                usage = ((player_df['FGA'] + 0.44 * player_df['FTA'] + player_df['TOV']) / mins * 48 / 5)
-                usage = usage.clip(0, 50)
-                combined.loc[mask, 'USAGE_RATE'] = usage.values
-                combined.loc[mask, 'USAGE_RATE_L5'] = usage.rolling(5, min_periods=1).mean().values
-                combined.loc[mask, 'USAGE_RATE_L10'] = usage.rolling(10, min_periods=1).mean().values
+                mins  = player_df['MIN'].replace(0, 1)
+                usage = ((player_df['FGA'] + 0.44 * player_df['FTA'] + player_df['TOV']) / mins * 48 / 5).clip(0, 50)
+                combined.loc[mask, 'USAGE_RATE']        = usage.values
+                combined.loc[mask, 'USAGE_RATE_L5']     = usage.rolling(5,  min_periods=1).mean().values
+                combined.loc[mask, 'USAGE_RATE_L10']    = usage.rolling(10, min_periods=1).mean().values
                 combined.loc[mask, 'USAGE_RATE_Season'] = usage.expanding().mean().values
 
         # ── Recompute team-level features for new game rows ──────────────────
@@ -1109,7 +1121,14 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
     """
     global _QUIET
     _QUIET = True  # Suppress internal loading noise
+    try:
+        return _scan_all_impl(df_history, models, is_tomorrow, max_days_forward)
+    finally:
+        _QUIET = False
 
+
+def _scan_all_impl(df_history, models, is_tomorrow=False, max_days_forward=7):
+    global _QUIET
     refresh_injuries()
     n_out = sum(1 for s in INJURY_DATA.values() if s == 'OUT')
     n_gtd = sum(1 for s in INJURY_DATA.values() if s != 'OUT')
@@ -1167,6 +1186,12 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
 
     # --- PRE-BUILD CACHE (O(N) once) ---
     latest_rows_map, team_rosters_map = build_data_cache(df_history)
+
+    # Pre-index player logs so hit-rate lookups are O(1) instead of O(N) per call
+    player_logs_index = {
+        pid: grp.sort_values('GAME_DATE')
+        for pid, grp in df_history.groupby('PLAYER_ID')
+    }
 
     _QUIET = False  # Re-enable output — status block goes here
 
@@ -1491,13 +1516,13 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 pp_val   = round(line, 2) if line else 0
                 edge_val = round(proj - line, 2) if line else 0
 
-                # Calculate Hit Rates
-                l5_hit, l10_hit, l20_hit = calculate_hit_rates(df_history, pid, target, line)
+                # Calculate Hit Rates (O(1) via pre-built index)
+                l5_hit, l10_hit, l20_hit = calculate_hit_rates(df_history, pid, target, line, player_logs_index)
 
                 # Calculate H2H Hit Rate
                 opp_id = info.get('opp')
                 opp_abbr = team_id_to_abbr.get(opp_id, '')
-                h2h_hit, h2h_n = calculate_h2h_hit_rate(df_history, pid, target, line, opp_abbr)
+                h2h_hit, h2h_n = calculate_h2h_hit_rate(df_history, pid, target, line, opp_abbr, player_logs_index)
 
                 all_projections.append({
                     'REC': rec,
@@ -1525,10 +1550,8 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 if (min_season > 5 and min_l5 / min_season > 1.4) or missing_usage_today > 25.0:
                     is_role_expansion = True
                 
-                # Fetch opponent context for Matchup Score if available in valid_input
-                opp_win_pct = None
-                if 'OPP_WIN_PCT' in valid_input.columns:
-                    opp_win_pct = valid_input['OPP_WIN_PCT'].iloc[0]
+                # Fetch opponent context for Matchup Score from last_row (avoids stale valid_input scope)
+                opp_win_pct = last_row.get('OPP_WIN_PCT')
 
                 # Low-Line Mathematical Variance Fix:
                 # Dividing by 0.5 can inflate a 0.38 block edge into a 76% edge.

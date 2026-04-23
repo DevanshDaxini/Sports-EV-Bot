@@ -33,7 +33,10 @@ import pandas as pd
 import time
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+_EASTERN = ZoneInfo('America/New_York')
 from src.core.utils import SimpleCache
 
 # --- CONFIGURATION ---
@@ -154,8 +157,8 @@ class FanDuelClient:
                     try:
                         ct = g.get('commence_time')
                         if ct:
-                            dt_utc = datetime.strptime(ct, "%Y-%m-%dT%H:%M:%SZ")
-                            dt_est = dt_utc - timedelta(hours=5)
+                            dt_utc = datetime.strptime(ct, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                            dt_est = dt_utc.astimezone(_EASTERN)
                             if dt_est.strftime('%Y-%m-%d') == target_date:
                                 filtered_games.append(g)
                     except:
@@ -172,8 +175,8 @@ class FanDuelClient:
                 try:
                     commence_time = game.get('commence_time')
                     if commence_time:
-                        dt_utc = datetime.strptime(commence_time, "%Y-%m-%dT%H:%M:%SZ")
-                        dt_est = dt_utc - timedelta(hours=5)
+                        dt_utc = datetime.strptime(commence_time, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                        dt_est = dt_utc.astimezone(_EASTERN)
                         game_date_str = dt_est.strftime('%Y-%m-%d')
                 except:
                     game_date_str = datetime.now().strftime('%Y-%m-%d')
@@ -181,7 +184,7 @@ class FanDuelClient:
                 print(f"      [{game_date_str}] Fetching props for Game {i+1}/{len(games_to_check)}...", end='\r')
                 props = self._fetch_props_for_game(sport_key, game['id'], game_date_str)
                 all_data.extend(props)
-                time.sleep(0.5)
+                time.sleep(0.25)
             print("")
 
         if not all_data:

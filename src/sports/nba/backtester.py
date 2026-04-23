@@ -36,15 +36,12 @@ DATA_FILE  = os.path.join(BASE_DIR, 'data',   'nba', 'processed', 'training_data
 MODEL_DIR  = os.path.join(BASE_DIR, 'models', 'nba')
 OUTPUT_DIR = os.path.join(BASE_DIR, 'output', 'nba', 'backtests')
 
-from src.sports.nba.train import get_features_for_target, ensure_combo_stats, TARGETS
+from src.sports.nba.train import get_features_for_target, ensure_combo_stats, TARGETS, LOG_TRANSFORM_TARGETS
 
 # PrizePicks pays $1 profit per $1.15 risked (roughly -115).
 # Break-even win rate = 1.15 / (1 + 1.15) = 53.5%
 PP_PAYOUT = 1.0 / 1.15      # $0.87 profit per $1 bet on a win
 PP_BREAK_EVEN = 1.15 / 2.15 # ~53.5% needed to break even
-
-# Stats where predictions are log-transformed during training
-LOG_TRANSFORM_TARGETS = {'BLK', 'STL', 'TOV', 'FG3M', 'SB'}
 
 # Minimum edge % required to flag a bet as "high-confidence"
 HIGH_CONF_EDGE_PCT = 5.0

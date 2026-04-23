@@ -15,6 +15,7 @@ import xgboost as xgb
 import os
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.metrics import mean_absolute_error, r2_score
+from src.sports.nba.train import get_features_for_target
 
 # --- CONFIGURATION ---
 BASE_DIR  = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -98,7 +99,8 @@ def tune_and_train():
         if target not in df.columns:
             continue
 
-        features_to_use = [f for f in FEATURES if target not in f]
+        all_features = get_features_for_target(target)
+        features_to_use = [f for f in all_features if f in train_df.columns]
 
         X_train = train_df[features_to_use]
         y_train = train_df[target]

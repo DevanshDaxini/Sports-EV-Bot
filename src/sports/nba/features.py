@@ -223,6 +223,7 @@ def add_usage_vacuum_features(df):
     sorted_idx = df.index
     df = df.reset_index(drop=True)
     df['TEAM_AVG_STARS'] = df.groupby('TEAM_ID')['STAR_COUNT'].transform(lambda x: x.shift(1).expanding().mean())
+    assert len(df) == len(sorted_idx), "add_usage_vacuum_features: row count changed before index restore"
     df.index = sorted_idx
     df.sort_index(inplace=True)
     
@@ -276,6 +277,7 @@ def add_missing_player_context(df):
     df = df.reset_index(drop=True)
     df = df.merge(missing_usage, on=['GAME_ID', 'TEAM_ID'], how='left')
     df['MISSING_USAGE'] = df['MISSING_USAGE'].fillna(0)
+    assert len(df) == len(sorted_idx), "add_missing_player_context: row count changed before index restore"
     df.index = sorted_idx
     
     return df
@@ -285,16 +287,15 @@ def add_schedule_density(df):
     print("...Calculating Schedule Density")
     df = df.copy()
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
-    df = df.sort_values(['PLAYER_ID', 'GAME_DATE'])
-    def get_rolling_count(group):
-        temp_series = pd.Series(1, index=group['GAME_DATE'])
-        return temp_series.rolling('7D').count().values
-    games_7d_list = []
-    for player_id, group in df.groupby('PLAYER_ID'):
-        counts = get_rolling_count(group)
-        games_7d_list.extend(counts)
-    df['GAMES_7D']  = games_7d_list
-    df['GAMES_7D']  = df['GAMES_7D'].astype(float)
+    df = df.sort_values(['PLAYER_ID', 'GAME_DATE']).reset_index(drop=True)
+
+    def _count_7d(group):
+        return pd.Series(
+            pd.Series(1, index=pd.DatetimeIndex(group['GAME_DATE'])).rolling('7D').count().values,
+            index=group.index
+        )
+
+    df['GAMES_7D']  = df.groupby('PLAYER_ID', group_keys=False).apply(_count_7d).astype(float)
     df['IS_4_IN_6'] = (df['GAMES_7D'] >= 4).astype(int)
     return df
 
@@ -405,9 +406,11 @@ def add_head_to_head_stats(df):
 def add_blocks_specific_features(df):
     print("...Adding Block-Specific Features")
     df = df.copy()
-    df['OPP_RIM_ATTEMPTS'] = df.groupby(['OPPONENT', 'SEASON_ID']).apply(
-        lambda x: (x['FGA'] - x['FG3A']).shift(1).rolling(10, min_periods=5).mean()
-    ).reset_index(level=[0, 1], drop=True)
+    df['_paint'] = df['FGA'] - df['FG3A']
+    df['OPP_RIM_ATTEMPTS'] = df.groupby(['OPPONENT', 'SEASON_ID'])['_paint'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).mean()
+    )
+    df.drop(columns=['_paint'], inplace=True)
     df['OPP_RIM_ATTEMPTS'] = df['OPP_RIM_ATTEMPTS'].fillna(
         df.groupby('SEASON_ID')['FGA'].transform('median') * 0.6)
     if 'PACE_ROLLING' in df.columns:
@@ -479,14 +482,17 @@ def add_rebound_specific_features(df):
     df = df.copy()
     
     # ===== EXISTING FEATURES (Keep these) =====
-    df['TEAM_OREB_EMPHASIS'] = df.groupby(['TEAM_ID', 'SEASON_ID']).apply(
-        lambda x: x['OREB'].shift(1).rolling(10, min_periods=5).sum() /
-                  (x['FGA'].shift(1).rolling(10, min_periods=5).sum() + 0.1)
-    ).reset_index(level=[0, 1], drop=True).fillna(0.25)
-    
-    df['OPP_REB_WEAKNESS'] = df.groupby(['OPPONENT', 'SEASON_ID']).apply(
-        lambda x: (x['OREB'] + x['DREB']).shift(1).rolling(10, min_periods=5).mean()
-    ).reset_index(level=[0, 1], drop=True)
+    df['_oreb_roll'] = df.groupby(['TEAM_ID', 'SEASON_ID'])['OREB'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).sum())
+    df['_fga_roll'] = df.groupby(['TEAM_ID', 'SEASON_ID'])['FGA'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).sum())
+    df['TEAM_OREB_EMPHASIS'] = (df['_oreb_roll'] / (df['_fga_roll'] + 0.1)).fillna(0.25)
+    df.drop(columns=['_oreb_roll', '_fga_roll'], inplace=True)
+
+    df['_total_reb'] = df['OREB'] + df['DREB']
+    df['OPP_REB_WEAKNESS'] = df.groupby(['OPPONENT', 'SEASON_ID'])['_total_reb'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).mean())
+    df.drop(columns=['_total_reb'], inplace=True)
     df['OPP_REB_WEAKNESS'] = df['OPP_REB_WEAKNESS'].fillna(df.groupby('SEASON_ID')['REB'].transform('median'))
     
     df['MISSED_SHOTS_PROXY']  = df['FGA'] - df['FGM']
@@ -502,9 +508,10 @@ def add_rebound_specific_features(df):
     ).fillna(df['FGA'].median())
     
     # Opponent 3PT rate affects rebound distance (long rebounds harder to predict)
-    df['OPP_3PT_RATE'] = df.groupby(['OPPONENT', 'SEASON_ID']).apply(
-        lambda x: (x['FG3A'] / (x['FGA'] + 0.1)).shift(1).rolling(10, min_periods=5).mean()
-    ).reset_index(level=[0, 1], drop=True).fillna(0.35)
+    df['_3pt_rate'] = df['FG3A'] / (df['FGA'] + 0.1)
+    df['OPP_3PT_RATE'] = df.groupby(['OPPONENT', 'SEASON_ID'])['_3pt_rate'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).mean()).fillna(0.35)
+    df.drop(columns=['_3pt_rate'], inplace=True)
     
     # Total rebounding opportunities (team + opponent misses)
     if 'PACE_ROLLING' in df.columns:
@@ -665,16 +672,6 @@ def add_assist_specific_features(df):
     return df
 
 
-def ensure_combo_stats(df):
-    df = df.copy()
-    if 'PRA' not in df.columns: df['PRA'] = df['PTS'] + df['REB'] + df['AST']
-    if 'PR'  not in df.columns: df['PR']  = df['PTS'] + df['REB']
-    if 'PA'  not in df.columns: df['PA']  = df['PTS'] + df['AST']
-    if 'RA'  not in df.columns: df['RA']  = df['REB'] + df['AST']
-    if 'SB'  not in df.columns: df['SB']  = df['STL'] + df['BLK']
-    return df
-
-
 def validate_data_quality(df):
     print("...Running Data Quality Checks")
     df = df.replace([np.inf, -np.inf], np.nan)
@@ -709,9 +706,10 @@ def add_blocks_enhanced_features(df):
     
     # 1. OPPONENT PAINT ATTACK RATE (Critical!)
     # Teams that drive to the rim get blocked more
-    df['OPP_PAINT_SHOTS'] = df.groupby(['OPPONENT', 'SEASON_ID']).apply(
-        lambda x: ((x['FGA'] - x['FG3A']) * 0.6).shift(1).rolling(10, min_periods=5).mean()
-    ).reset_index(level=[0, 1], drop=True).fillna(25)
+    df['_paint_adj'] = (df['FGA'] - df['FG3A']) * 0.6
+    df['OPP_PAINT_SHOTS'] = df.groupby(['OPPONENT', 'SEASON_ID'])['_paint_adj'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).mean()).fillna(25)
+    df.drop(columns=['_paint_adj'], inplace=True)
     
     # Opponent rim attack rate
     if 'OPP_FGA_VOLUME' in df.columns:
@@ -792,7 +790,6 @@ def main():
     df = ensure_combo_stats(df)
     df = df.sort_values(['PLAYER_ID', 'GAME_DATE'])
 
-    print("\n--- STAGE 3: HISTORICAL FEATURES ---")
     print("\n--- STAGE 3: HISTORICAL FEATURES ---")
     df = add_rolling_features(df)
     df = add_home_away_performance(df)
