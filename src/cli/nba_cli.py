@@ -30,7 +30,7 @@ from src.sports.nba.mappings import PP_NORMALIZATION_MAP, STAT_MAPPING, VOLATILI
 import src.sports.nba.scanner as ai_scanner_module
 from src.sports.nba.scanner import (
     load_data, load_models, get_games, prepare_features, normalize_name,
-    refresh_injuries, get_player_status, auto_refresh_data
+    refresh_injuries, get_player_status, auto_refresh_data, get_all_projections
 )
 
 warnings.filterwarnings('ignore')
@@ -42,114 +42,49 @@ OUTPUT_DIR = os.path.join(_BASE, 'output', 'nba', 'scans')
 
 # --- HELPER: RUN AI PREDICTIONS ---
 def get_ai_predictions():
-    refresh_injuries()  # Fresh injury data for accurate projections
+    """
+    Thin wrapper around the canonical get_all_projections() engine.
+
+    Fetches projections for today's and (if different) tomorrow's slate,
+    merges them, and returns a DataFrame with columns: Player, Stat, AI_Proj.
+
+    All post-processing (DAYS_REST, fresh pace/opp stats, playoff factor,
+    availability scale_factor, correlation constraints) is handled inside
+    get_all_projections(), so results here are guaranteed to match the
+    AI Scanner and Player Scout output exactly.
+    """
+    refresh_injuries()
     df_history = load_data()
     if df_history is not None:
         df_history = auto_refresh_data(df_history)
-    models     = load_models()
+    models = load_models()
 
     if df_history is None or not models:
         return pd.DataFrame()
 
-    # --- Fetch game schedule ---
-    # get_games() searches forward when a date has no games, so offset=0 and
-    # offset=1 often both resolve to the same future date (e.g. next Thursday).
-    # When that happens we skip the second call entirely to avoid printing the
-    # same "Found N games on …" block twice.
-    first_teams, first_date = get_games(date_offset=0, require_scheduled=True)
-
-    all_teams = dict(first_teams) if first_teams else {}
-
-    # Only make the second call if the first result was actually today
-    # (meaning tomorrow might have different games).  If offset=0 already
-    # jumped forward, offset=1 will land on the same date — skip it.
     today_str = datetime.now().strftime('%Y-%m-%d')
-    if first_date != today_str:
-        # first_date is already a future date; offset=1 would find the same slate
-        pass
-    else:
-        second_teams, second_date = get_games(date_offset=1, require_scheduled=True)
-        if second_teams and second_date != first_date:
-            for team_id, info in second_teams.items():
-                if team_id not in all_teams:
-                    all_teams[team_id] = info
 
-    if not all_teams:
-        return pd.DataFrame()
+    # Today's (or next available) slate
+    first_df = get_all_projections(df_history, models, date_offset=0)
 
-    ai_results = []
+    # Determine the date that was actually used so we can skip a redundant call
+    _, first_date = get_games(date_offset=0, require_scheduled=True)
 
-    for team_id, info in all_teams.items():
-        team_players = df_history[df_history['TEAM_ID'] == team_id]['PLAYER_ID'].unique()
+    if first_date and first_date != today_str:
+        # get_all_projections already jumped to a future date; offset=1 would
+        # resolve to the same slate — no second call needed.
+        return first_df
 
-        # Calculate missing usage + OUT count for USAGE_VACUUM fix
-        missing_usage_today = 0.0
-        team_out_count = 0
-        for pid in team_players:
-            p_rows = df_history[df_history['PLAYER_ID'] == pid].sort_values('GAME_DATE')
-            if p_rows.empty:
-                continue
-            last_row = p_rows.iloc[-1]
-            if get_player_status(last_row['PLAYER_NAME'], ai_scanner_module.INJURY_DATA) == 'OUT':
-                usage = last_row.get('USAGE_RATE_Season', 0)
-                if usage > 15:
-                    missing_usage_today += usage
-                    team_out_count += 1
+    # Tomorrow's slate (only if it's a different date)
+    second_df = get_all_projections(df_history, models, date_offset=1)
+    _, second_date = get_games(date_offset=1, require_scheduled=True)
 
-        for pid in team_players:
-            p_rows = df_history[df_history['PLAYER_ID'] == pid].sort_values('GAME_DATE')
-            if p_rows.empty:
-                continue
-            last_row    = p_rows.iloc[-1]
-            player_name = last_row['PLAYER_NAME']
+    if second_date and second_date != first_date and not second_df.empty:
+        combined = pd.concat([first_df, second_df], ignore_index=True)
+        combined = combined.drop_duplicates(subset=['Player', 'Stat'], keep='first')
+        return combined
 
-            # Skip injured (OUT) players — no projection for them
-            if get_player_status(player_name, ai_scanner_module.INJURY_DATA) == 'OUT':
-                continue
-
-            input_row = prepare_features(
-                last_row,
-                is_home=info['is_home'],
-                missing_usage=missing_usage_today
-            )
-
-            # Fix stale USAGE_VACUUM: each OUT teammate reduces STAR_COUNT by 1,
-            # so USAGE_VACUUM (= TEAM_AVG_STARS - STAR_COUNT) increases by out count.
-            if team_out_count > 0 and 'USAGE_VACUUM' in input_row.columns:
-                input_row['USAGE_VACUUM'] = float(input_row['USAGE_VACUUM'].iloc[0]) + team_out_count
-
-            for target, model in models.items():
-                if target not in ACTIVE_TARGETS:
-                    continue
-                feats       = model.feature_names_in_
-                valid_input = input_row.reindex(columns=feats, fill_value=0)
-
-                # 1H backfill: rolling stats are NaN/0 when auto-refresh lacks 1H data
-                if target in ('PTS_1H', 'PRA_1H', 'FPTS_1H'):
-                    for _stat in ['PTS_1H', 'PRA_1H', 'FPTS_1H', 'MIN_1H', 'PRA', 'PTS']:
-                        _sc = f'{_stat}_Season'
-                        if _sc not in valid_input.columns:
-                            continue
-                        _sv = valid_input[_sc].iloc[0]
-                        if pd.isna(_sv) or _sv <= 0:
-                            continue
-                        _sv = float(_sv)
-                        for _suf in ['_L5', '_L10', '_L20', '_L5_Median', '_L10_Median']:
-                            _col = f'{_stat}{_suf}'
-                            if _col not in valid_input.columns:
-                                continue
-                            _cur = valid_input[_col].iloc[0]
-                            if pd.isna(_cur) or float(_cur) == 0:
-                                valid_input[_col] = _sv
-
-                raw = float(model.predict(valid_input)[0])
-                if target in LOG_TRANSFORM_TARGETS:
-                    proj = float(np.expm1(max(raw, 0))) * LOG_CALIBRATION.get(target, 1.0)
-                else:
-                    proj = max(raw, 0.0)
-                ai_results.append({'Player': player_name, 'Stat': target, 'AI_Proj': round(proj, 2)})
-
-    return pd.DataFrame(ai_results)
+    return first_df
 
 
 # --- TOOL 1: SUPER SCANNER ---
@@ -476,8 +411,9 @@ def run_builder():
     if confirm != 'y':
         return
     try:
-        from src.sports.nba.builder import fetch_all_game_logs, fetch_player_positions
+        from src.sports.nba.builder import fetch_all_game_logs, fetch_1h_game_logs, fetch_player_positions
         fetch_all_game_logs()
+        fetch_1h_game_logs()
         fetch_player_positions()
         print("\nData build complete!")
         print("   Next: Run 'Engineer Features' then 'Train Models'.")
@@ -634,16 +570,20 @@ def search_by_market():
         input("\nPress Enter to continue...")
         return
 
-    # Only keep rows that actually have a PrizePicks line
-    df = df[df['PP'].notna() & (df['PP'] > 0)].copy()
     if df.empty:
-        print("\nNo lines found in scan file.")
+        print("\nNo projection data found in scan file.")
         input("\nPress Enter to continue...")
         return
 
+    # Compute PCT_EDGE only for players that have a PrizePicks line.
+    # Players without a line get NaN (displayed as '--' in the table).
     # Match the scanner's safe_denominator logic: max(line, 2.0) prevents
     # low lines (e.g. BLK 0.5) from inflating edge% vs what the scanner reports.
-    df['PCT_EDGE'] = (df['EDGE'] / df['PP'].clip(lower=2.0)) * 100
+    has_line = df['PP'].notna() & (df['PP'] > 0)
+    df['PCT_EDGE'] = float('nan')
+    df.loc[has_line, 'PCT_EDGE'] = (
+        df.loc[has_line, 'EDGE'] / df.loc[has_line, 'PP'].clip(lower=2.0)
+    ) * 100
 
     available = sorted(df['TARGET'].unique())
     labels = {
@@ -688,10 +628,15 @@ def search_by_market():
             input("Press Enter..."); continue
 
         sub = df[df['TARGET'] == target].copy()
-        sub = sub.sort_values('PCT_EDGE', key=abs, ascending=False)
+        # Players with a line: sort by absolute edge descending.
+        # Players without a line: appended after, sorted by AI projection.
+        lined   = sub[sub['PCT_EDGE'].notna()].sort_values('PCT_EDGE', key=abs, ascending=False)
+        no_line = sub[sub['PCT_EDGE'].isna()].sort_values('AI', ascending=False)
+        sub = pd.concat([lined, no_line], ignore_index=True)
 
-        overs  = sub[sub['EDGE'] > 0].sort_values('PCT_EDGE', ascending=False)
-        unders = sub[sub['EDGE'] < 0].sort_values('PCT_EDGE', ascending=True)
+        overs  = sub[sub['EDGE'] > 0].sort_values('PCT_EDGE', ascending=False, na_position='last')
+        unders = sub[sub['EDGE'] < 0].sort_values('PCT_EDGE', ascending=True,  na_position='last')
+        no_line_rows = sub[sub['PP'].isna() | (sub['PP'] <= 0)]
 
         def _print_market_table(rows, side_label):
             if rows.empty:
@@ -712,8 +657,10 @@ def search_by_market():
                     h2h = f"{rate*100:.0f}%({h2h_n})"
                 else:
                     h2h = '--'
-                print(f"   {i:>3}  {str(row['NAME'])[:25]:<25} {row['AI']:>6.1f} {row['PP']:>6.1f} "
-                      f"{row['PCT_EDGE']:>+8.1f}% {l5:>4} {l10:>4} {l20:>4} {h2h:>8}")
+                pp_str   = f"{row['PP']:6.1f}" if (row['PP'] > 0 if pd.notna(row['PP']) else False) else '  N/A '
+                edge_str = f"{row['PCT_EDGE']:+8.1f}%" if pd.notna(row['PCT_EDGE']) else '      --'
+                print(f"   {i:>3}  {str(row['NAME'])[:25]:<25} {row['AI']:>6.1f} {pp_str} "
+                      f"{edge_str} {l5:>4} {l10:>4} {l20:>4} {h2h:>8}")
             print(f"{'─' * 100}")
 
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -723,6 +670,8 @@ def search_by_market():
         print(f"{'═' * 100}")
         _print_market_table(overs,  f"OVERS  — players projected above the line")
         _print_market_table(unders, f"UNDERS — players projected below the line")
+        if not no_line_rows.empty:
+            _print_market_table(no_line_rows, f"NO LINE — all other players in today's games")
 
         input("\nPress Enter to search another market or go back...")
 
@@ -742,8 +691,94 @@ def run_grade_all():
     input("\nPress Enter to continue...")
 
 
+# --- STARTUP PIPELINE CHECK ---
+def startup_pipeline_check():
+    """Auto-refresh data, features, and models on startup if stale."""
+    raw_log_path    = os.path.join(_BASE, 'data', 'nba', 'raw', 'raw_game_logs.csv')
+    training_path   = os.path.join(_BASE, 'data', 'nba', 'processed', 'training_dataset.csv')
+    model_dir       = os.path.join(_BASE, 'models', 'nba')
+    first_model     = os.path.join(model_dir, 'PTS_model.json')
+
+    print("\n" + "=" * 55)
+    print("   STARTUP DATA CHECK")
+    print("=" * 55)
+
+    # --- 1. Check raw data staleness ---
+    needs_raw_refresh = True
+    days_stale = 999
+    if os.path.exists(raw_log_path):
+        try:
+            df_raw = pd.read_csv(raw_log_path, usecols=['GAME_DATE'])
+            last_date = pd.to_datetime(df_raw['GAME_DATE']).max()
+            today     = pd.to_datetime(datetime.now().strftime('%Y-%m-%d'))
+            days_stale = (today - last_date).days
+            needs_raw_refresh = days_stale > 1
+            status = "FRESH" if not needs_raw_refresh else f"STALE ({days_stale}d)"
+            print(f"   Game logs:  {last_date.date()}  [{status}]")
+        except Exception as e:
+            print(f"   Game logs:  could not read ({e})")
+    else:
+        print("   Game logs:  NOT FOUND")
+
+    # --- 2. Refresh raw data if stale ---
+    if needs_raw_refresh:
+        print("\n   Fetching new game logs from NBA API...")
+        try:
+            from src.sports.nba.builder import fetch_all_game_logs, fetch_1h_game_logs
+            fetch_all_game_logs()
+            fetch_1h_game_logs()
+            print("   Raw data updated.")
+        except Exception as e:
+            print(f"   Data fetch failed: {e}")
+
+    # --- 3. Re-engineer features if raw data was refreshed ---
+    needs_features = needs_raw_refresh
+    if not needs_features and os.path.exists(training_path) and os.path.exists(raw_log_path):
+        # Also rebuild if training dataset is older than raw logs
+        try:
+            raw_mtime  = os.path.getmtime(raw_log_path)
+            feat_mtime = os.path.getmtime(training_path)
+            needs_features = raw_mtime > feat_mtime
+        except Exception:
+            pass
+
+    if needs_features:
+        print("   Re-engineering features...")
+        try:
+            from src.sports.nba.features import main as features_main
+            features_main()
+            print("   Features rebuilt.")
+        except Exception as e:
+            print(f"   Feature engineering failed: {e}")
+
+    # --- 4. Retrain models if >7 days old ---
+    needs_retrain = False
+    if os.path.exists(first_model):
+        model_age_days = (datetime.now().timestamp() - os.path.getmtime(first_model)) / 86400
+        needs_retrain  = model_age_days > 7
+        print(f"   Models:     {model_age_days:.1f} days old  [{'RETRAIN' if needs_retrain else 'OK'}]")
+    else:
+        needs_retrain = True
+        print("   Models:     NOT FOUND")
+
+    if needs_retrain:
+        print("   Retraining XGBoost models (this takes a few minutes)...")
+        try:
+            from src.sports.nba.train import train_and_evaluate
+            train_and_evaluate()
+            print("   Models retrained.")
+        except Exception as e:
+            print(f"   Training failed: {e}")
+
+    print("=" * 55)
+    print("   Ready.")
+    print("=" * 55)
+
+
 # --- MAIN MENU ---
 def main_menu():
+    startup_pipeline_check()
+
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
 

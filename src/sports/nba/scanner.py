@@ -53,6 +53,14 @@ ACCURACY_LOG_FILE  = os.path.join(PROJ_DIR, 'accuracy_log.csv')
 
 warnings.filterwarnings('ignore')
 
+# Playoffs run April-June. Pace drops ~4.5% vs regular season.
+# Apply this multiplier to continuous full-game projections during that window.
+PLAYOFF_MONTHS = {4, 5, 6}
+PLAYOFF_PACE_FACTOR = 0.955
+
+# Minimum edge (%) required to surface a bet. Smaller edges are noise.
+MIN_EDGE_PCT = 2.5
+
 # Suppress verbose internal prints during batch loading (set True in scan_all)
 _QUIET = False
 
@@ -512,7 +520,7 @@ def auto_refresh_data(df_history):
     """
     Fetch recent game logs from NBA API and merge into df_history.
     On success, saves updated data to disk so future runs skip the API call.
-    
+
     Returns: updated df_history with new rows merged in.
     """
     from nba_api.stats.endpoints import playergamelogs
@@ -668,13 +676,16 @@ def auto_refresh_data(df_history):
                 # 0s in 1H cols mean "no 1H box score available" — treat as NaN to avoid dilution
                 combined[_tmp] = combined[_tmp].replace(0, float('nan'))
             grp = combined.groupby('PLAYER_ID')[_tmp]
-            combined[f'{stat}_L5']         = grp.transform(lambda x: x.rolling(5,  min_periods=1).mean())
-            combined[f'{stat}_L10']        = grp.transform(lambda x: x.rolling(10, min_periods=1).mean())
-            combined[f'{stat}_L20']        = grp.transform(lambda x: x.rolling(20, min_periods=1).mean())
-            combined[f'{stat}_Season']     = grp.transform(lambda x: x.expanding().mean())
-            combined[f'{stat}_L5_Median']  = grp.transform(lambda x: x.rolling(5,  min_periods=1).median())
-            combined[f'{stat}_L10_Median'] = grp.transform(lambda x: x.rolling(10, min_periods=1).median())
+            combined[f'{stat}_L5']         = grp.transform(lambda x: x.shift(1).rolling(5,  min_periods=1).mean())
+            combined[f'{stat}_L10']        = grp.transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
+            # _L20: EWMA(span=10) — matches features.py recency-weighted rolling
+            combined[f'{stat}_L20']        = grp.transform(lambda x: x.shift(1).ewm(span=10, min_periods=1, adjust=False).mean())
+            # _Season: EWMA(span=30) — long baseline but de-emphasises early-season slumps
+            combined[f'{stat}_Season']     = grp.transform(lambda x: x.shift(1).ewm(span=30, min_periods=1, adjust=False).mean())
+            combined[f'{stat}_L5_Median']  = grp.transform(lambda x: x.shift(1).rolling(5,  min_periods=1).median())
+            combined[f'{stat}_L10_Median'] = grp.transform(lambda x: x.shift(1).rolling(10, min_periods=1).median())
             combined.drop(columns=[_tmp], inplace=True)
+
 
         # GAME_SCORE and USAGE_RATE are derived stats — recompute only for updated players
         gs_cols = ['PTS', 'FGM', 'FGA', 'FTM', 'FTA', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'PF']
@@ -689,17 +700,17 @@ def auto_refresh_data(df_history):
                       + 0.7 * player_df['AST'] + 0.7 * player_df['BLK']
                       - 0.4 * player_df['PF'] - player_df['TOV'])
                 combined.loc[mask, 'GAME_SCORE']        = gs.values
-                combined.loc[mask, 'GAME_SCORE_L5']     = gs.rolling(5,  min_periods=1).mean().values
-                combined.loc[mask, 'GAME_SCORE_L10']    = gs.rolling(10, min_periods=1).mean().values
-                combined.loc[mask, 'GAME_SCORE_Season'] = gs.expanding().mean().values
+                combined.loc[mask, 'GAME_SCORE_L5']     = gs.shift(1).rolling(5,  min_periods=1).mean().values
+                combined.loc[mask, 'GAME_SCORE_L10']    = gs.shift(1).rolling(10, min_periods=1).mean().values
+                combined.loc[mask, 'GAME_SCORE_Season'] = gs.shift(1).expanding().mean().values
 
             if all(c in player_df.columns for c in ['FGA', 'FTA', 'TOV', 'MIN']):
                 mins  = player_df['MIN'].replace(0, 1)
                 usage = ((player_df['FGA'] + 0.44 * player_df['FTA'] + player_df['TOV']) / mins * 48 / 5).clip(0, 50)
                 combined.loc[mask, 'USAGE_RATE']        = usage.values
-                combined.loc[mask, 'USAGE_RATE_L5']     = usage.rolling(5,  min_periods=1).mean().values
-                combined.loc[mask, 'USAGE_RATE_L10']    = usage.rolling(10, min_periods=1).mean().values
-                combined.loc[mask, 'USAGE_RATE_Season'] = usage.expanding().mean().values
+                combined.loc[mask, 'USAGE_RATE_L5']     = usage.shift(1).rolling(5,  min_periods=1).mean().values
+                combined.loc[mask, 'USAGE_RATE_L10']    = usage.shift(1).rolling(10, min_periods=1).mean().values
+                combined.loc[mask, 'USAGE_RATE_Season'] = usage.shift(1).expanding().mean().values
 
         # ── Recompute team-level features for new game rows ──────────────────
         # Auto-refresh adds raw stats only; STAR_COUNT, PACE_ROLLING, OPP_PTS_ALLOWED,
@@ -923,7 +934,10 @@ def _fetch_scoreboard_cdn(game_date):
             data = resp.json()
             games = data.get('scoreboard', {}).get('games', [])
             df = _cdn_scoreboard_to_df(games)
-            if not df.empty:
+            # Only use live scoreboard if it has upcoming/in-progress games.
+            # If all games are final (status 3), the endpoint is showing yesterday's
+            # carryover — fall through to the schedule which has today's actual games.
+            if not df.empty and (df['GAME_STATUS_ID'] < 3).any():
                 return df
         except Exception as e:
             _log(f"   CDN scoreboard failed, trying schedule...", flush=True)
@@ -1107,6 +1121,235 @@ def _build_team_map(games_df):
             'opp': g['HOME_TEAM_ID']
         }
     return team_map
+
+
+# ============================================================================
+# CANONICAL PROJECTION ENGINE  (shared by Super Scanner + AI Scanner)
+# ============================================================================
+
+def get_all_projections(df_history, models, date_offset=0, max_days_forward=7):
+    """
+    Run the full prediction pipeline for all players in today's (or tomorrow's)
+    scheduled games and return a tidy DataFrame.
+
+    This is the SINGLE source of truth used by both the Super Scanner
+    (get_ai_predictions in nba_cli.py) and the AI Scanner display path.
+    Every post-processing step matches _scan_all_impl exactly:
+        - Current-season-only roster via build_data_cache
+        - Actual DAYS_REST per player
+        - Fresh PACE_ROLLING (team last-10 games)
+        - Fresh opponent defensive stats (opp last-10 games)
+        - Playoff pace factor (Apr–Jun, non-log targets)
+        - Availability scale_factor (injuries / minute restrictions)
+        - Correlation constraints for combo stats (PR, PRA, PA, RA, SB)
+
+    Returns:
+        pd.DataFrame with columns: Player, Stat, AI_Proj
+    """
+    global _QUIET
+    prev_quiet = _QUIET
+    _QUIET = True
+
+    try:
+        todays_teams, actual_date = get_games(
+            date_offset=date_offset,
+            require_scheduled=True,
+            max_days_forward=max_days_forward
+        )
+
+        if not todays_teams or not actual_date:
+            return pd.DataFrame(columns=['Player', 'Stat', 'AI_Proj'])
+
+        # --- Current-season roster + forward-filled slow features ---
+        latest_rows_map, team_rosters_map = build_data_cache(df_history)
+
+        # --- Pre-compute fresh pace & opp stats ---
+        _season_col = 'SEASON_YEAR' if 'SEASON_YEAR' in df_history.columns else 'SEASON_ID'
+        _cur_season = df_history[_season_col].max()
+        _df_cur = df_history[df_history[_season_col] == _cur_season]
+
+        fresh_pace_cache = {}
+        for _tid in todays_teams:
+            _tgames = _df_cur[_df_cur['TEAM_ID'] == _tid].copy()
+            if _tgames.empty or not all(c in _tgames.columns for c in ['FGA', 'FTA', 'TOV', 'MIN']):
+                continue
+            _mins = _tgames['MIN'].replace(0, 0.1)
+            _oreb = _tgames['OREB'] if 'OREB' in _tgames.columns else 0
+            _poss = _tgames['FGA'] + 0.44 * _tgames['FTA'] - _oreb + _tgames['TOV']
+            _tgames['_p48'] = (_poss / _mins * 48).clip(0, 200)
+            _by_game = _tgames.groupby('GAME_ID').agg({'_p48': 'mean', 'GAME_DATE': 'first'}).sort_values('GAME_DATE')
+            _last10 = _by_game['_p48'].iloc[-10:].mean()
+            if not pd.isna(_last10):
+                fresh_pace_cache[_tid] = float(_last10)
+
+        _OPP_STAT_COLS = {
+            'OPP_PTS_ALLOWED': 'PTS', 'OPP_REB_ALLOWED': 'REB', 'OPP_AST_ALLOWED': 'AST',
+            'OPP_FG3M_ALLOWED': 'FG3M', 'OPP_FGA_ALLOWED': 'FGA', 'OPP_FGM_ALLOWED': 'FGM',
+            'OPP_FTM_ALLOWED': 'FTM', 'OPP_FTA_ALLOWED': 'FTA',
+            'OPP_STL_ALLOWED': 'STL', 'OPP_BLK_ALLOWED': 'BLK', 'OPP_TOV_ALLOWED': 'TOV',
+        }
+        fresh_opp_stats_cache = {}
+        for _tid in todays_teams:
+            _opp_id = todays_teams[_tid].get('opp')
+            if not _opp_id or _opp_id in fresh_opp_stats_cache:
+                continue
+            _opp_games  = _df_cur[_df_cur['TEAM_ID'] == _opp_id].sort_values('GAME_DATE')
+            _last10_gids = _opp_games['GAME_ID'].unique()[-10:]
+            _opp_facing  = _df_cur[_df_cur['GAME_ID'].isin(_last10_gids) & (_df_cur['TEAM_ID'] != _opp_id)]
+            if _opp_facing.empty:
+                continue
+            _stats = {}
+            for _opp_col, _raw_col in _OPP_STAT_COLS.items():
+                if _raw_col in _opp_facing.columns:
+                    _stats[_opp_col] = float(_opp_facing[_raw_col].mean())
+            for _opp_col, _raw_col in _OPP_STAT_COLS.items():
+                _diff_col = _opp_col + '_DIFF'
+                if _raw_col in _opp_facing.columns and _raw_col in _df_cur.columns:
+                    _stats[_diff_col] = _stats.get(_opp_col, float(_df_cur[_raw_col].mean())) - float(_df_cur[_raw_col].mean())
+            fresh_opp_stats_cache[_opp_id] = _stats
+
+        avail_cache = {}
+        ai_results  = []
+
+        for team_id, info in todays_teams.items():
+            team_players = team_rosters_map.get(team_id, [])
+
+            # Missing usage / OUT count
+            missing_usage_today = 0.0
+            team_out_count = 0
+            for pid in team_players:
+                row = latest_rows_map.get(pid)
+                if not row:
+                    continue
+                if get_player_status(row['PLAYER_NAME']) == 'OUT':
+                    usage = row.get('USAGE_RATE_Season', 0)
+                    if usage > 15:
+                        missing_usage_today += usage
+                        team_out_count += 1
+
+            for pid in team_players:
+                last_row = latest_rows_map.get(pid)
+                if not last_row:
+                    continue
+
+                player_name = last_row['PLAYER_NAME']
+                if get_player_status(player_name) == 'OUT':
+                    continue
+
+                # Actual DAYS_REST
+                last_game_date = last_row.get('GAME_DATE')
+                if last_game_date and actual_date:
+                    try:
+                        days_rest = max(1, min(7, (pd.to_datetime(actual_date) - pd.to_datetime(last_game_date)).days))
+                    except Exception:
+                        days_rest = 2
+                else:
+                    days_rest = 2
+
+                # Availability analysis (cached per player)
+                if pid not in avail_cache:
+                    avail_cache[pid] = analyze_player_availability(df_history, pid, actual_date)
+
+                input_row = prepare_features(
+                    last_row,
+                    is_home=info['is_home'],
+                    days_rest=days_rest,
+                    missing_usage=missing_usage_today
+                )
+
+                # USAGE_VACUUM fix
+                if team_out_count > 0:
+                    old_uv = float(input_row['USAGE_VACUUM'].iloc[0]) if 'USAGE_VACUUM' in input_row.columns else 0.0
+                    input_row['USAGE_VACUUM'] = old_uv + team_out_count
+
+                # Fresh PACE_ROLLING
+                if team_id in fresh_pace_cache and 'PACE_ROLLING' in input_row.columns:
+                    input_row['PACE_ROLLING'] = fresh_pace_cache[team_id]
+
+                # Fresh opponent stats
+                _opp_id = info.get('opp')
+                if _opp_id and _opp_id in fresh_opp_stats_cache:
+                    for _col, _val in fresh_opp_stats_cache[_opp_id].items():
+                        if _col in input_row.columns:
+                            input_row[_col] = _val
+
+                # --- Run models ---
+                player_predictions = {}
+                features_ok = True
+
+                for target, model in models.items():
+                    if not features_ok:
+                        break
+                    try:
+                        model_features = list(model.feature_names_in_)
+                        valid_input    = input_row.reindex(columns=model_features, fill_value=0)
+
+                        # 1H backfill
+                        if target in ('PTS_1H', 'PRA_1H', 'FPTS_1H'):
+                            for _stat in ['PTS_1H', 'PRA_1H', 'FPTS_1H', 'MIN_1H', 'PRA', 'PTS']:
+                                _sc = f'{_stat}_Season'
+                                if _sc not in valid_input.columns:
+                                    continue
+                                _sv = valid_input[_sc].iloc[0]
+                                if pd.isna(_sv) or _sv <= 0:
+                                    continue
+                                _sv = float(_sv)
+                                for _suf in ['_L5', '_L10', '_L20', '_L5_Median', '_L10_Median']:
+                                    _col = f'{_stat}{_suf}'
+                                    if _col not in valid_input.columns:
+                                        continue
+                                    _cur = valid_input[_col].iloc[0]
+                                    if pd.isna(_cur) or float(_cur) == 0:
+                                        valid_input[_col] = _sv
+
+                        raw = float(model.predict(valid_input)[0])
+                        if target in LOG_TRANSFORM_TARGETS:
+                            proj = float(np.expm1(max(raw, 0))) * LOG_CALIBRATION.get(target, 1.0)
+                        else:
+                            proj = max(raw, 0.0)
+
+                        # Playoff pace adjustment
+                        if datetime.now().month in PLAYOFF_MONTHS and target not in LOG_TRANSFORM_TARGETS:
+                            proj *= PLAYOFF_PACE_FACTOR
+
+                        player_predictions[target] = proj
+                    except Exception:
+                        features_ok = False
+
+                if not features_ok:
+                    continue
+
+                # Availability scale_factor
+                avail = avail_cache.get(pid, {'scale_factor': 1.0})
+                if avail['scale_factor'] < 1.0:
+                    for tgt in player_predictions:
+                        player_predictions[tgt] *= avail['scale_factor']
+
+                # Correlation constraints (combo stats averaged with component sum)
+                pts = player_predictions.get('PTS', 0)
+                reb = player_predictions.get('REB', 0)
+                ast = player_predictions.get('AST', 0)
+                stl = player_predictions.get('STL', 0)
+                blk = player_predictions.get('BLK', 0)
+
+                if 'PRA' in player_predictions:
+                    player_predictions['PRA'] = (player_predictions['PRA'] + pts + reb + ast) / 2
+                if 'PR' in player_predictions:
+                    player_predictions['PR'] = (player_predictions['PR'] + pts + reb) / 2
+                if 'PA' in player_predictions:
+                    player_predictions['PA'] = (player_predictions['PA'] + pts + ast) / 2
+                if 'RA' in player_predictions:
+                    player_predictions['RA'] = (player_predictions['RA'] + reb + ast) / 2
+                if 'SB' in player_predictions:
+                    player_predictions['SB'] = (player_predictions['SB'] + stl + blk) / 2
+
+                for tgt, proj in player_predictions.items():
+                    ai_results.append({'Player': player_name, 'Stat': tgt, 'AI_Proj': round(proj, 2)})
+
+        return pd.DataFrame(ai_results) if ai_results else pd.DataFrame(columns=['Player', 'Stat', 'AI_Proj'])
+
+    finally:
+        _QUIET = prev_quiet
 
 
 # ============================================================================
@@ -1463,6 +1706,10 @@ def _scan_all_impl(df_history, models, is_tomorrow=False, max_days_forward=7):
                         proj = float(np.expm1(max(raw, 0))) * LOG_CALIBRATION.get(target, 1.0)
                     else:
                         proj = max(raw, 0.0)
+                    # Playoff pace adjustment: regular season models overpredict
+                    # volume stats during slower playoff pace (Apr-Jun).
+                    if datetime.now().month in PLAYOFF_MONTHS and target not in LOG_TRANSFORM_TARGETS:
+                        proj *= PLAYOFF_PACE_FACTOR
                     player_predictions[target] = proj
                 except Exception:
                     # Model mismatch or missing features
@@ -1578,7 +1825,8 @@ def _scan_all_impl(df_history, models, is_tomorrow=False, max_days_forward=7):
                     edge_threshold = tier_info.get('threshold', 2.5)
 
                     # Only surface plays with meaningful edge above model tier threshold
-                    if abs(pct_edge) >= edge_threshold:
+                    # Also enforce global MIN_EDGE_PCT floor (eliminates noise plays)
+                    if abs(pct_edge) >= max(edge_threshold, MIN_EDGE_PCT):
                         # ── MULTI-SIGNAL CONFIRMATION FILTER ──────────────────────
                         # Skip bets where historical data strongly contradicts the AI.
                         # Derived from backtest analysis: when L10 hit-rate strongly
@@ -1599,7 +1847,13 @@ def _scan_all_impl(df_history, models, is_tomorrow=False, max_days_forward=7):
                             )
                         )
 
-                        if l10_vetoes or h2h_vetoes:
+                        # Directional hit rate floor: skip if BOTH L5 and L10 are
+                        # below 40% alignment — recent history too strongly contradicts.
+                        l5_aligned  = l5_hit  if ai_says_over else (1 - l5_hit)
+                        l10_aligned = l10_hit if ai_says_over else (1 - l10_hit)
+                        hit_floor_veto = (l5_aligned < 0.40 and l10_aligned < 0.40)
+
+                        if l10_vetoes or h2h_vetoes or hit_floor_veto:
                             continue  # Historical data overrules the model
                         # ──────────────────────────────────────────────────────────
 
@@ -2213,15 +2467,22 @@ def scout_player(df_history, models):
         live_lines_full = pp_client.fetch_lines_with_type(league_filter='NBA')
         norm_lines_full = {normalize_name(k): v for k, v in live_lines_full.items()}
 
+        # Use same data cache approach as batch scan for consistency
+        latest_rows_map, team_rosters_map = build_data_cache(df_history)
+
         try:
             player_data = matches.sort_values('GAME_DATE').iloc[-1]
+            player_id = player_data['PLAYER_ID']
+            # Use cached row (has forward-filled slow features) instead of raw
+            if player_id in latest_rows_map:
+                player_data = pd.Series(latest_rows_map[player_id])
         except IndexError:
             print("No recent history found for this player.")
             continue
 
         name    = player_data['PLAYER_NAME']
         team_id = player_data['TEAM_ID']
-        
+
         # Check if the player's team is in the team_map for the 'actual_date'
         if team_id not in todays_teams:
             print(f"{name} is not scheduled to play on {actual_date}.")

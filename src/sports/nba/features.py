@@ -88,30 +88,54 @@ def add_advanced_stats(df):
 
 
 def add_rolling_features(df):
-    print("...Calculating Rolling Averages (Rookie-Friendly)")
+    print("...Calculating Rolling Averages (Recency-Weighted)")
     df = df.copy()
     df['CAREER_GAMES'] = df.groupby('PLAYER_ID').cumcount() + 1
     grouped = df.groupby('PLAYER_ID')
     base_stats = ['PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL', 'BLK', 'TOV', 'FGM', 'FGA', 'FTM', 'FTA']
     stats_to_roll = base_stats + ['MIN', 'GAME_SCORE', 'USAGE_RATE', 'FPTS']
     
-    # Add 1H equivalents (Only keeping highly liquid markets to reduce noise)
-    stats_to_roll.extend(['PTS_1H', 'MIN_1H', 'FPTS_1H'])
-    
+    # Add 1H equivalents only if 1H data was loaded
+    stats_to_roll.extend([s for s in ['PTS_1H', 'MIN_1H', 'FPTS_1H'] if s in df.columns])
+
     for combo in ['PRA', 'PR', 'PA', 'RA', 'SB', 'PRA_1H', 'PR_1H', 'PA_1H', 'RA_1H', 'SB_1H']:
         if combo in df.columns:
             stats_to_roll.append(combo)
+
+    # Deduplicate and filter to columns that actually exist
+    stats_to_roll = [s for s in dict.fromkeys(stats_to_roll) if s in df.columns]
+
+    # Mask near-DNP games so blowout bench rides don't poison rolling windows.
+    # Rows with MIN < 5 contribute nothing useful to future-game predictions.
+    DNP_MIN_THRESHOLD = 5
+    qualified = df.copy()
+    qualified.loc[qualified['MIN'] < DNP_MIN_THRESHOLD, stats_to_roll] = float('nan')
+    grouped_q = qualified.groupby('PLAYER_ID')
+
     rolling_data = {}
     for stat in stats_to_roll:
-        # Averages
-        rolling_data[f'{stat}_L5']     = grouped[stat].transform(lambda x: x.shift(1).rolling(5, min_periods=3).mean())
-        rolling_data[f'{stat}_L10']    = grouped[stat].transform(lambda x: x.shift(1).rolling(10, min_periods=5).mean())
-        rolling_data[f'{stat}_L20']    = grouped[stat].transform(lambda x: x.shift(1).rolling(20, min_periods=10).mean())
-        rolling_data[f'{stat}_Season'] = grouped[stat].transform(lambda x: x.shift(1).expanding(min_periods=1).mean())
-        
-        # Medians (Fixes recency bias outlilers)
-        rolling_data[f'{stat}_L5_Median'] = grouped[stat].transform(lambda x: x.shift(1).rolling(5, min_periods=3).median())
-        rolling_data[f'{stat}_L10_Median'] = grouped[stat].transform(lambda x: x.shift(1).rolling(10, min_periods=5).median())
+        src = grouped_q
+        # Short-window averages (flat rolling — unchanged)
+        rolling_data[f'{stat}_L5']  = src[stat].transform(lambda x: x.shift(1).rolling(5,  min_periods=3).mean())
+        rolling_data[f'{stat}_L10'] = src[stat].transform(lambda x: x.shift(1).rolling(10, min_periods=5).mean())
+
+        # _L20: exponentially weighted mean (span=10, ~20-game half-life).
+        # Puts 2× more weight on the most recent game vs. 20 games ago,
+        # so hot/cold streaks flow through to predictions instead of being
+        # swamped by a flat equal-weight window.
+        rolling_data[f'{stat}_L20'] = src[stat].transform(
+            lambda x: x.shift(1).ewm(span=10, min_periods=5, adjust=False).mean()
+        )
+
+        # _Season: long EWMA (span=30) gives a stable baseline while still
+        # de-emphasising a slow early-season start.
+        rolling_data[f'{stat}_Season'] = src[stat].transform(
+            lambda x: x.shift(1).ewm(span=30, min_periods=1, adjust=False).mean()
+        )
+
+        # Medians (flat rolling — unchanged)
+        rolling_data[f'{stat}_L5_Median']  = src[stat].transform(lambda x: x.shift(1).rolling(5,  min_periods=3).median())
+        rolling_data[f'{stat}_L10_Median'] = src[stat].transform(lambda x: x.shift(1).rolling(10, min_periods=5).median())
     df = pd.concat([df, pd.DataFrame(rolling_data, index=df.index)], axis=1)
     return df
 
@@ -158,16 +182,17 @@ def add_defense_vs_position(df):
     print("...Calculating Defense vs. Position (L10 Window)")
     df = df.copy()
     defense_group = df.groupby(['OPPONENT', 'POSITION'])
+    available_stats = [s for s in TARGET_STATS if s in df.columns]
     new_def_cols = {}
-    for stat in TARGET_STATS:
+    for stat in available_stats:
         col_name = f'OPP_{stat}_ALLOWED'
         new_def_cols[col_name] = defense_group[stat].transform(
             lambda x: x.shift(1).rolling(10, min_periods=10).mean())
     df = pd.concat([df, pd.DataFrame(new_def_cols, index=df.index)], axis=1)
-    
+
     # Normalize DvP vs League Average (DvP Diff)
     # "Allowed 25 pts" means nothing if league avg is 26.
-    for stat in TARGET_STATS:
+    for stat in available_stats:
         col_name = f'OPP_{stat}_ALLOWED'
         league_pos_avg = df.groupby(['POSITION', 'SEASON_ID'])[stat].transform('median')
         df[col_name] = df[col_name].fillna(league_pos_avg)
@@ -669,6 +694,16 @@ def add_assist_specific_features(df):
             lambda x: x.shift(1).rolling(10, min_periods=5).mean()
         ).fillna(0.5)
     
+    return df
+
+
+def ensure_combo_stats(df):
+    df = df.copy()
+    if 'PRA' not in df.columns: df['PRA'] = df['PTS'] + df['REB'] + df['AST']
+    if 'PR'  not in df.columns: df['PR']  = df['PTS'] + df['REB']
+    if 'PA'  not in df.columns: df['PA']  = df['PTS'] + df['AST']
+    if 'RA'  not in df.columns: df['RA']  = df['REB'] + df['AST']
+    if 'SB'  not in df.columns: df['SB']  = df['STL'] + df['BLK']
     return df
 
 

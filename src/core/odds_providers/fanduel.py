@@ -44,6 +44,16 @@ CACHE_DIR = 'fanduel_cache'
 CACHE_FILE = os.path.join(CACHE_DIR, 'fanduel_cache.json')
 CACHE_DURATION_MINUTES = 30
 
+# Sharp books = better true probability estimates (lower vig, closer to market)
+SHARP_BOOKS = ['pinnacle', 'betonlineag', 'lowvig', 'circasports']
+# Soft books = where the +EV bets live
+SOFT_BOOKS = [
+    'fanduel', 'draftkings', 'betmgm', 'caesars',
+    'pointsbet_us', 'betrivers', 'unibet_us', 'espnbet',
+    'superbook', 'wynnbet', 'barstool',
+]
+ALL_BOOKS = SHARP_BOOKS + SOFT_BOOKS
+
 # Expanded Market List
 SAFE_MARKETS = [
     'player_points',
@@ -139,7 +149,7 @@ class FanDuelClient:
                 'regions': self.regions,
                 'markets': 'h2h',
                 'oddsFormat': self.odds_format,
-                'bookmakers': 'fanduel'
+                'bookmakers': ','.join(ALL_BOOKS)
             }
 
             try:
@@ -229,7 +239,7 @@ class FanDuelClient:
             'regions': self.regions,
             'markets': markets_string,
             'oddsFormat': self.odds_format,
-            'bookmakers': 'fanduel'
+            'bookmakers': ','.join(ALL_BOOKS)
         }
 
         try:
@@ -242,25 +252,27 @@ class FanDuelClient:
             print(f"\n      \u274c Request exception for game {game_id}: {e}")
             return []
 
-        clean_odds = []
         bookmakers = data.get('bookmakers', [])
         if not bookmakers:
-            print(f"\n      \u26a0\ufe0f  No FanDuel bookmaker data for game {game_id} (bookmakers list empty)")
+            print(f"\n      \u26a0\ufe0f  No bookmaker data for game {game_id}")
             return []
-        book = bookmakers[0]
 
-        for market in book['markets']:
-            raw_stat = market['key']
-            stat_name = LOCAL_STAT_MAP.get(raw_stat, self.stat_map.get(raw_stat, raw_stat))
-            for outcome in market['outcomes']:
-                clean_odds.append({
-                    'Player': outcome['description'],
-                    'Stat': stat_name,
-                    'Line': outcome.get('point', 0),
-                    'Odds': outcome.get('price', 0),
-                    'Side': outcome['name'],
-                    'Date': game_date
-                })
+        clean_odds = []
+        for book in bookmakers:
+            book_key = book.get('key', 'unknown')
+            for market in book.get('markets', []):
+                raw_stat = market['key']
+                stat_name = LOCAL_STAT_MAP.get(raw_stat, self.stat_map.get(raw_stat, raw_stat))
+                for outcome in market['outcomes']:
+                    clean_odds.append({
+                        'Player': outcome['description'],
+                        'Stat': stat_name,
+                        'Line': outcome.get('point', 0),
+                        'Odds': outcome.get('price', 0),
+                        'Side': outcome['name'],
+                        'Date': game_date,
+                        'Bookmaker': book_key,
+                    })
         return clean_odds
 
 
