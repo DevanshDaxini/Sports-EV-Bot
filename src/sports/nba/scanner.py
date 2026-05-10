@@ -880,47 +880,64 @@ def rebuild_playoff_rolling_features(df_history):
     season_col = 'SEASON_YEAR' if 'SEASON_YEAR' in df.columns else 'SEASON_ID'
     current_season = df[season_col].max()
 
-    # Detect playoff games: April-June with small roster (playoff series are 4-8 teams)
-    df['IS_PLAYOFF'] = (df['GAME_DATE'].dt.month.isin([4, 5, 6])) & (df['GAME_DATE'].dt.year == datetime.now().year)
-    playoff_df = df[df['IS_PLAYOFF']].copy()
+    # Detect actual playoff series: May 1+ (skip early April play-in/weak games)
+    # Real NBA playoffs start early May for first round
+    df['IS_PLAYOFF'] = (df['GAME_DATE'] >= pd.to_datetime('2026-05-01')) & (df['GAME_DATE'].dt.month.isin([5, 6]))
 
-    if playoff_df.empty:
+    if not df['IS_PLAYOFF'].any():
         return df  # No playoff data yet
 
-    _log(f"   Found {len(playoff_df)} playoff player-games")
+    _log(f"   Found {len(df[df['IS_PLAYOFF']])} playoff player-games")
 
-    # For each player in playoffs, recalculate L5, L10 using ONLY their playoff games
+    # For each player, recalculate L5/L10 using ONLY their playoff games
     ROLLING_STATS = ['PTS', 'REB', 'AST', 'FGA', 'FG3A', 'FTA', 'TOV', 'FGM', 'FTM', 'FG3M', 'STL', 'BLK', 'MIN']
 
-    for pid in playoff_df['PLAYER_ID'].unique():
-        player_playoff = playoff_df[playoff_df['PLAYER_ID'] == pid].sort_values('GAME_DATE')
+    for pid in df[df['IS_PLAYOFF']]['PLAYER_ID'].unique():
+        # Get all games for this player, sorted by date (keep original index)
+        player_mask = df['PLAYER_ID'] == pid
+        player_df = df[player_mask].sort_values('GAME_DATE')
 
-        if len(player_playoff) < 2:
-            continue  # Need at least 2 games for rolling
+        if len(player_df) < 2:
+            continue
 
-        # Recalculate rolling features for this player's playoff games only
+        # Get original indices to update df correctly
+        original_indices = player_df.index.tolist()
+
+        # For each stat, compute rolling features
         for stat in ROLLING_STATS:
             if stat not in df.columns:
                 continue
 
-            # L5: last 5 games (within playoff series)
-            col_l5 = f'{stat}_L5'
-            if col_l5 in df.columns:
-                # Calculate rolling mean, shift by 1 to exclude current game
-                player_playoff[col_l5] = player_playoff[stat].shift(1).rolling(window=5, min_periods=1).mean()
-                df.loc[player_playoff.index, col_l5] = player_playoff[col_l5]
+            # For each playoff game by this player
+            for i, (orig_idx, (_, row)) in enumerate(zip(original_indices, player_df.iterrows())):
+                if not row['IS_PLAYOFF']:
+                    continue
 
-            # L10: last 10 games (full series + earlier series)
-            col_l10 = f'{stat}_L10'
-            if col_l10 in df.columns:
-                player_playoff[col_l10] = player_playoff[stat].shift(1).rolling(window=10, min_periods=1).mean()
-                df.loc[player_playoff.index, col_l10] = player_playoff[col_l10]
+                # Get all PREVIOUS playoff games for this player (not including current)
+                prev_games = player_df[(player_df['GAME_DATE'] < row['GAME_DATE']) & (player_df['IS_PLAYOFF'])]
 
-            # L10_Median
-            col_med = f'{stat}_L10_Median'
-            if col_med in df.columns:
-                player_playoff[col_med] = player_playoff[stat].shift(1).rolling(window=10, min_periods=1).median()
-                df.loc[player_playoff.index, col_med] = player_playoff[col_med]
+                if len(prev_games) == 0:
+                    continue
+
+                prev_vals = prev_games[stat].values
+
+                # L5: mean of last 5
+                col_l5 = f'{stat}_L5'
+                if col_l5 in df.columns:
+                    val = prev_vals[-5:].mean() if len(prev_vals) > 0 else np.nan
+                    df.at[orig_idx, col_l5] = val
+
+                # L10: mean of last 10
+                col_l10 = f'{stat}_L10'
+                if col_l10 in df.columns:
+                    val = prev_vals[-10:].mean() if len(prev_vals) > 0 else np.nan
+                    df.at[orig_idx, col_l10] = val
+
+                # L10_Median
+                col_med = f'{stat}_L10_Median'
+                if col_med in df.columns:
+                    val = np.median(prev_vals[-10:]) if len(prev_vals) > 0 else np.nan
+                    df.at[orig_idx, col_med] = val
 
     return df
 
