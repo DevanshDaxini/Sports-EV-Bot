@@ -2483,6 +2483,51 @@ def scout_player(df_history, models):
         'TOV': 0.045, 'FGM': 0.040, 'FGA': 0.040, 'FTM': 0.050, 'FTA': 0.050,
     }
 
+    # Pre-compute fresh pace & opp stats once (match get_all_projections logic)
+    _season_col = 'SEASON_YEAR' if 'SEASON_YEAR' in df_history.columns else 'SEASON_ID'
+    _cur_season = df_history[_season_col].max()
+    _df_cur = df_history[df_history[_season_col] == _cur_season]
+
+    fresh_pace_cache = {}
+    for _tid in todays_teams:
+        _tgames = _df_cur[_df_cur['TEAM_ID'] == _tid].copy()
+        if _tgames.empty or not all(c in _tgames.columns for c in ['FGA', 'FTA', 'TOV', 'MIN']):
+            continue
+        _mins = _tgames['MIN'].replace(0, 0.1)
+        _oreb = _tgames['OREB'] if 'OREB' in _tgames.columns else 0
+        _poss = _tgames['FGA'] + 0.44 * _tgames['FTA'] - _oreb + _tgames['TOV']
+        _tgames['_p48'] = (_poss / _mins * 48).clip(0, 200)
+        _by_game = _tgames.groupby('GAME_ID').agg({'_p48': 'mean', 'GAME_DATE': 'first'}).sort_values('GAME_DATE')
+        _last10 = _by_game['_p48'].iloc[-10:].mean()
+        if not pd.isna(_last10):
+            fresh_pace_cache[_tid] = float(_last10)
+
+    _OPP_STAT_COLS = {
+        'OPP_PTS_ALLOWED': 'PTS', 'OPP_REB_ALLOWED': 'REB', 'OPP_AST_ALLOWED': 'AST',
+        'OPP_FG3M_ALLOWED': 'FG3M', 'OPP_FGA_ALLOWED': 'FGA', 'OPP_FGM_ALLOWED': 'FGM',
+        'OPP_FTM_ALLOWED': 'FTM', 'OPP_FTA_ALLOWED': 'FTA',
+        'OPP_STL_ALLOWED': 'STL', 'OPP_BLK_ALLOWED': 'BLK', 'OPP_TOV_ALLOWED': 'TOV',
+    }
+    fresh_opp_stats_cache = {}
+    for _tid in todays_teams:
+        _opp_id = todays_teams[_tid].get('opp')
+        if not _opp_id or _opp_id in fresh_opp_stats_cache:
+            continue
+        _opp_games = _df_cur[_df_cur['TEAM_ID'] == _opp_id].sort_values('GAME_DATE')
+        _last10_gids = _opp_games['GAME_ID'].unique()[-10:]
+        _opp_facing = _df_cur[_df_cur['GAME_ID'].isin(_last10_gids) & (_df_cur['TEAM_ID'] != _opp_id)]
+        if _opp_facing.empty:
+            continue
+        _stats = {}
+        for _opp_col, _raw_col in _OPP_STAT_COLS.items():
+            if _raw_col in _opp_facing.columns:
+                _stats[_opp_col] = float(_opp_facing[_raw_col].mean())
+        for _opp_col, _raw_col in _OPP_STAT_COLS.items():
+            _diff_col = _opp_col + '_DIFF'
+            if _raw_col in _opp_facing.columns and _raw_col in _df_cur.columns:
+                _stats[_diff_col] = _stats.get(_opp_col, float(_df_cur[_raw_col].mean())) - float(_df_cur[_raw_col].mean())
+        fresh_opp_stats_cache[_opp_id] = _stats
+
     scouting   = True
 
     while scouting:
@@ -2615,34 +2660,16 @@ def scout_player(df_history, models):
             old_uv = float(input_row['USAGE_VACUUM'].iloc[0]) if 'USAGE_VACUUM' in input_row.columns else 0.0
             input_row['USAGE_VACUUM'] = old_uv + team_out_count
 
-        # Fresh PACE_ROLLING from this team's last 10 games
-        _sc = 'SEASON_YEAR' if 'SEASON_YEAR' in df_history.columns else 'SEASON_ID'
-        _df_c = df_history[df_history[_sc] == df_history[_sc].max()]
-        _tgames = _df_c[_df_c['TEAM_ID'] == team_id].copy()
-        if not _tgames.empty and all(c in _tgames.columns for c in ['FGA', 'FTA', 'TOV', 'MIN']):
-            _mins = _tgames['MIN'].replace(0, 0.1)
-            _oreb = _tgames['OREB'] if 'OREB' in _tgames.columns else 0
-            _poss = _tgames['FGA'] + 0.44 * _tgames['FTA'] - _oreb + _tgames['TOV']
-            _tgames['_p48'] = (_poss / _mins * 48).clip(0, 200)
-            _by_game = _tgames.groupby('GAME_ID').agg({'_p48': 'mean', 'GAME_DATE': 'first'}).sort_values('GAME_DATE')
-            _pace = _by_game['_p48'].iloc[-10:].mean()
-            if not pd.isna(_pace) and 'PACE_ROLLING' in input_row.columns:
-                input_row['PACE_ROLLING'] = float(_pace)
+        # Inject pre-computed fresh PACE_ROLLING
+        if team_id in fresh_pace_cache and 'PACE_ROLLING' in input_row.columns:
+            input_row['PACE_ROLLING'] = fresh_pace_cache[team_id]
 
-        # Fresh opponent stats for today's actual matchup
-        _opp_team_id = todays_teams[team_id].get('opp')
-        if _opp_team_id:
-            _opp_games = _df_c[_df_c['TEAM_ID'] == _opp_team_id]
-            _last10_gids = _opp_games['GAME_ID'].unique()[-10:]
-            _opp_facing = _df_c[_df_c['GAME_ID'].isin(_last10_gids) & (_df_c['TEAM_ID'] != _opp_team_id)]
-            if not _opp_facing.empty:
-                for _opp_col, _raw_col in [
-                    ('OPP_PTS_ALLOWED','PTS'), ('OPP_REB_ALLOWED','REB'), ('OPP_AST_ALLOWED','AST'),
-                    ('OPP_FGA_ALLOWED','FGA'), ('OPP_FGM_ALLOWED','FGM'), ('OPP_FG3M_ALLOWED','FG3M'),
-                    ('OPP_STL_ALLOWED','STL'), ('OPP_BLK_ALLOWED','BLK'), ('OPP_TOV_ALLOWED','TOV'),
-                ]:
-                    if _raw_col in _opp_facing.columns and _opp_col in input_row.columns:
-                        input_row[_opp_col] = float(_opp_facing[_raw_col].mean())
+        # Inject pre-computed fresh opponent stats
+        _opp_id = todays_teams[team_id].get('opp')
+        if _opp_id and _opp_id in fresh_opp_stats_cache:
+            for _col, _val in fresh_opp_stats_cache[_opp_id].items():
+                if _col in input_row.columns:
+                    input_row[_col] = _val
 
         # Lookup FanDuel odds and PrizePicks lines for this player
         player_fd = fd_odds_by_player.get(normalize_name(name), {})
