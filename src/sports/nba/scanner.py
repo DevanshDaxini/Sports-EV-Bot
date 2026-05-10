@@ -1501,7 +1501,11 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
 
 
 def _scan_all_impl(df_history, models, is_tomorrow=False, max_days_forward=7):
-    global _QUIET
+    global _QUIET, _BUILD_CACHE_KEY, _BUILD_CACHE_RESULT
+    # Clear cache to force rebuild_playoff_rolling_features to run each scan
+    _BUILD_CACHE_KEY = None
+    _BUILD_CACHE_RESULT = None
+
     refresh_injuries()
     n_out = sum(1 for s in INJURY_DATA.values() if s == 'OUT')
     n_gtd = sum(1 for s in INJURY_DATA.values() if s != 'OUT')
@@ -2476,6 +2480,11 @@ def _calculate_injury_adjustments(df_history, team_id, active_pid):
 
 
 def scout_player(df_history, models):
+    global _BUILD_CACHE_KEY, _BUILD_CACHE_RESULT
+    # Clear cache to force rebuild_playoff_rolling_features to run
+    _BUILD_CACHE_KEY = None
+    _BUILD_CACHE_RESULT = None
+
     print("\n--- PLAYER SCOUT ---")
     refresh_injuries()
     d_choice = input("Select Start Date (1=Today, 2=Tomorrow): ").strip()
