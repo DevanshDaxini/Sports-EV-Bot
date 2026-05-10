@@ -451,9 +451,43 @@ def analyze_player_availability(df_history, player_id, scan_date_str):
         result['flag'] = '⚠RTN'
         result['reason'] = f'Ramping up: {mins_list[0]:.0f}→{mins_list[1]:.0f}→{mins_list[2]:.0f}min (avg {season_min_avg:.0f})'
     
+    # --- 6. Role reduction: check raw logs for recent sub-10-min games ---
+    # training_dataset filters MIN < 10, so the above logic can't see low-minute
+    # playoff appearances. Check raw_game_logs.csv directly to catch these.
+    _raw_file = os.path.join(BASE_DIR, 'data', 'nba', 'raw', 'raw_game_logs.csv')
+    if os.path.exists(_raw_file):
+        try:
+            _raw = pd.read_csv(_raw_file, usecols=['PLAYER_ID', 'GAME_DATE', 'MIN'],
+                               dtype={'PLAYER_ID': str, 'MIN': float},
+                               parse_dates=['GAME_DATE'])
+            _raw['PLAYER_ID'] = _raw['PLAYER_ID'].astype(str)
+            _pid_str = str(player_id)
+            _player_raw = _raw[_raw['PLAYER_ID'] == _pid_str].sort_values('GAME_DATE')
+            if not _player_raw.empty:
+                _last_known = player_logs['GAME_DATE'].iloc[-1]
+                # Games in raw logs AFTER player's last df_history game
+                _recent_raw = _player_raw[_player_raw['GAME_DATE'] > _last_known]
+                if not _recent_raw.empty:
+                    _low_min = _recent_raw[_recent_raw['MIN'] < 10]
+                    if not _low_min.empty:
+                        _last_raw_min = _recent_raw.iloc[-1]['MIN']
+                        _last_raw_date = _recent_raw.iloc[-1]['GAME_DATE'].strftime('%m/%d')
+                        _ratio = _last_raw_min / season_min_avg if season_min_avg > 5 else 1.0
+                        _new_scale = max(0.50, _ratio * 0.85)
+                        if _new_scale < result['scale_factor']:
+                            result['scale_factor'] = _new_scale
+                            result['penalty'] = min(result['penalty'] - 20.0, -20.0)
+                            result['flag'] = '⚠ROLE'
+                            result['reason'] = (
+                                f'Role reduction: {_last_raw_min:.0f}min on {_last_raw_date} '
+                                f'vs {season_min_avg:.0f}min season avg — model uses pre-reduction data'
+                            )
+        except Exception:
+            pass
+
     # Clamp scale_factor
     result['scale_factor'] = max(0.50, min(1.0, result['scale_factor']))
-    
+
     return result
 
 
@@ -528,6 +562,7 @@ def auto_refresh_data(df_history):
     latest_date = df_history['GAME_DATE'].max()
     today = pd.to_datetime(datetime.now().strftime('%Y-%m-%d'))
     days_stale = (today - latest_date).days
+    _log(f"   [DEBUG] auto_refresh_data called: {len(df_history):,} rows, last game: {latest_date.date()}, days_stale: {days_stale}")
 
     if days_stale <= 1:
         _log(f"   ✅ Data is fresh (last game: {latest_date.date()})")
@@ -802,7 +837,18 @@ def auto_refresh_data(df_history):
         return combined
 
     except Exception as e:
-        print(f"   ⚠️  Auto-refresh failed ({e}), using existing dataset")
+        import traceback
+        _log(f"   ❌ Auto-refresh processing failed: {e}")
+        _log(f"   📋 Traceback: {traceback.format_exc()}")
+        # Try to save partial update (merged new rows) if available
+        try:
+            if 'combined' in locals() and combined is not None and not combined.empty:
+                combined.to_csv(DATA_FILE, index=False)
+                _log(f"   💾 Saved partial update ({len(combined):,} rows, may have incomplete features)")
+                return combined
+        except:
+            pass
+        _log(f"   ⚠️  Falling back to existing dataset")
         return df_history
 
 
@@ -810,14 +856,92 @@ def auto_refresh_data(df_history):
 # DATA CACHING (Optimization)
 # ---------------------------------------------------------------------------
 
+_BUILD_CACHE_KEY    = None  # (max_date, n_rows)
+_BUILD_CACHE_RESULT = None  # (latest_rows_map, team_rosters_map)
+
+
+def is_playoff_season():
+    """Check if current date falls in playoff window (Apr-Jun)."""
+    return datetime.now().month in {4, 5, 6}
+
+
+def rebuild_playoff_rolling_features(df_history):
+    """
+    During playoffs (Apr-Jun), recalculate rolling features using ONLY playoff games.
+    Regular season rolling stats don't represent playoff form (higher mins, intensity).
+    Returns modified dataframe with playoff-appropriate rolling averages.
+    """
+    if not is_playoff_season():
+        return df_history  # Return unmodified if not in playoff season
+
+    _log("...Rebuilding rolling features for playoff season")
+
+    df = df_history.copy()
+    season_col = 'SEASON_YEAR' if 'SEASON_YEAR' in df.columns else 'SEASON_ID'
+    current_season = df[season_col].max()
+
+    # Detect playoff games: April-June with small roster (playoff series are 4-8 teams)
+    df['IS_PLAYOFF'] = (df['GAME_DATE'].dt.month.isin([4, 5, 6])) & (df['GAME_DATE'].dt.year == datetime.now().year)
+    playoff_df = df[df['IS_PLAYOFF']].copy()
+
+    if playoff_df.empty:
+        return df  # No playoff data yet
+
+    _log(f"   Found {len(playoff_df)} playoff player-games")
+
+    # For each player in playoffs, recalculate L5, L10 using ONLY their playoff games
+    ROLLING_STATS = ['PTS', 'REB', 'AST', 'FGA', 'FG3A', 'FTA', 'TOV', 'FGM', 'FTM', 'FG3M', 'STL', 'BLK', 'MIN']
+
+    for pid in playoff_df['PLAYER_ID'].unique():
+        player_playoff = playoff_df[playoff_df['PLAYER_ID'] == pid].sort_values('GAME_DATE')
+
+        if len(player_playoff) < 2:
+            continue  # Need at least 2 games for rolling
+
+        # Recalculate rolling features for this player's playoff games only
+        for stat in ROLLING_STATS:
+            if stat not in df.columns:
+                continue
+
+            # L5: last 5 games (within playoff series)
+            col_l5 = f'{stat}_L5'
+            if col_l5 in df.columns:
+                # Calculate rolling mean, shift by 1 to exclude current game
+                player_playoff[col_l5] = player_playoff[stat].shift(1).rolling(window=5, min_periods=1).mean()
+                df.loc[player_playoff.index, col_l5] = player_playoff[col_l5]
+
+            # L10: last 10 games (full series + earlier series)
+            col_l10 = f'{stat}_L10'
+            if col_l10 in df.columns:
+                player_playoff[col_l10] = player_playoff[stat].shift(1).rolling(window=10, min_periods=1).mean()
+                df.loc[player_playoff.index, col_l10] = player_playoff[col_l10]
+
+            # L10_Median
+            col_med = f'{stat}_L10_Median'
+            if col_med in df.columns:
+                player_playoff[col_med] = player_playoff[stat].shift(1).rolling(window=10, min_periods=1).median()
+                df.loc[player_playoff.index, col_med] = player_playoff[col_med]
+
+    return df
+
+
 def build_data_cache(df_history):
     """
     Pre-indexes the dataframe for O(1) lookups.
+    During playoffs, rebuilds rolling features to use playoff-only data (not full season).
     Returns:
         latest_rows_map: {pid: row_dict}
         team_rosters_map: {team_id: [pid, pid, ...]}
     """
+    global _BUILD_CACHE_KEY, _BUILD_CACHE_RESULT
+    cache_key = (df_history['GAME_DATE'].max(), len(df_history))
+    if _BUILD_CACHE_KEY == cache_key and _BUILD_CACHE_RESULT is not None:
+        return _BUILD_CACHE_RESULT
+
     _log("...Building data cache for fast lookups")
+
+    # Rebuild rolling features for playoff season
+    df_history = rebuild_playoff_rolling_features(df_history)
 
     # Filter to current season only — prevents traded players from inflating
     # team rosters (e.g. Deandre Ayton still mapping to the Suns)
@@ -856,12 +980,14 @@ def build_data_cache(df_history):
         _log(f"   ⚠️  {n_fixed} slow-feature NaNs remain after ffill (new players with no history)")
 
     # 1. Latest Rows Map
-    latest_rows_map = df_latest.set_index('PLAYER_ID').to_dict('index')
+    latest_rows_map = df_latest.set_index('PLAYER_ID', drop=False).to_dict('index')
 
     # 2. Team Rosters Map (current season only)
     team_rosters_map = df_latest.groupby('TEAM_ID')['PLAYER_ID'].apply(list).to_dict()
 
-    return latest_rows_map, team_rosters_map
+    _BUILD_CACHE_KEY    = cache_key
+    _BUILD_CACHE_RESULT = (latest_rows_map, team_rosters_map)
+    return _BUILD_CACHE_RESULT
 
 
 def load_models():
@@ -1309,8 +1435,12 @@ def get_all_projections(df_history, models, date_offset=0, max_days_forward=7):
                             proj = max(raw, 0.0)
 
                         # Playoff pace adjustment
-                        if datetime.now().month in PLAYOFF_MONTHS and target not in LOG_TRANSFORM_TARGETS:
-                            proj *= PLAYOFF_PACE_FACTOR
+                        # DISABLED: Factor 0.955 reduces projections, but playoff data shows they should increase
+                        # (Edwards +30 miss, Randle +16 miss on 2026-05-08 playoff game).
+                        # Playoffs have higher minutes/usage but factor goes wrong direction.
+                        # TODO: Rebuild rolling features with playoff-only data or implement stat-specific factors
+                        # if datetime.now().month in PLAYOFF_MONTHS and target not in LOG_TRANSFORM_TARGETS:
+                        #     proj *= PLAYOFF_PACE_FACTOR
 
                         player_predictions[target] = proj
                     except Exception:
@@ -2473,9 +2603,12 @@ def scout_player(df_history, models):
         try:
             player_data = matches.sort_values('GAME_DATE').iloc[-1]
             player_id = player_data['PLAYER_ID']
+            player_name = player_data['PLAYER_NAME']
             # Use cached row (has forward-filled slow features) instead of raw
-            if player_id in latest_rows_map:
-                player_data = pd.Series(latest_rows_map[player_id])
+            if player_id not in latest_rows_map:
+                print(f"No cache data found for {player_name}.")
+                continue
+            player_data = pd.Series(latest_rows_map[player_id])
         except IndexError:
             print("No recent history found for this player.")
             continue
@@ -2739,6 +2872,26 @@ def main():
         return
 
     df = auto_refresh_data(df)
+
+    while True:
+        print("\n" + "="*30 + "\n   NBA AI SCANNER\n" + "="*30)
+        print("1. Scan TODAY's Games")
+        print("2. Scan NEXT Match")
+        print("3. Scout Specific Player")
+        print("0. Exit")
+        choice = input("\nSelect: ").strip()
+        if choice == '1':   scan_all(df, models, is_tomorrow=False, max_days_forward=0)
+        elif choice == '2': scan_all(df, models, is_tomorrow=True, max_days_forward=7)
+        elif choice == '3': scout_player(df, models)
+        elif choice == '0': break
+
+
+def main_with_data(df, models):
+    """Same interactive loop as main() but accepts pre-loaded data — avoids reloading."""
+    refresh_injuries()
+    if df is None or not models:
+        print("Setup failed.")
+        return
 
     while True:
         print("\n" + "="*30 + "\n   NBA AI SCANNER\n" + "="*30)

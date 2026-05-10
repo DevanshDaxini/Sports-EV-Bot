@@ -30,7 +30,7 @@ import os
 # Disk cache config  (mirrors fanduel.py pattern)
 # ---------------------------------------------------------------------------
 CACHE_DIR              = 'prizepicks_cache'
-CACHE_DURATION_MINUTES = 2
+CACHE_DURATION_MINUTES = 30
 
 
 def _cache_file_for_league(league_filter):
@@ -169,49 +169,53 @@ class PrizePicksClient:
             # Append each league_id to the query
             for lid in active_ids:
                 url += f"&league_id[]={lid}"
-        
+
         # Small random delay — be polite
         time.sleep(random.uniform(0.5, 1.5))
+
+        def _stale_cache_fallback(reason):
+            """Return stale cache data rather than an empty result."""
+            stale = self._load_stale_cache(league_filter)
+            if stale is not None:
+                print(f"   PrizePicks: {reason} — using stale cache")
+                df = pd.DataFrame(stale)
+                if not include_alts and 'OddsType' in df.columns:
+                    df = df[df['OddsType'].isin(['standard', ''])]
+                return self._apply_filters(df, league_filter, date_filter)
+            print(f"   PrizePicks: {reason} — no cache available")
+            return pd.DataFrame()
 
         # --- 3. Fetch ---
         try:
             response = self.session.get(url, timeout=15)
         except requests.exceptions.ConnectionError as e:
-            print("PrizePicks: connection error")
-            return pd.DataFrame()
+            return _stale_cache_fallback("connection error")
         except requests.exceptions.Timeout:
-            print("PrizePicks: request timed out")
-            return pd.DataFrame()
+            return _stale_cache_fallback("request timed out")
         except Exception as e:
-            print(f"PrizePicks: unexpected error — {e}")
-            return pd.DataFrame()
+            return _stale_cache_fallback(f"unexpected error — {e}")
 
         # --- 4. Handle bad status ---
         if response.status_code == 403:
-            print("PrizePicks: 403 Forbidden")
-            return pd.DataFrame()
+            return _stale_cache_fallback("403 Forbidden")
 
         if response.status_code == 429:
-            print("PrizePicks: rate limited (429)")
-            return pd.DataFrame()
+            return _stale_cache_fallback("rate limited (429)")
 
         if response.status_code != 200:
-            print(f"PrizePicks: unexpected status {response.status_code}")
-            return pd.DataFrame()
+            return _stale_cache_fallback(f"unexpected status {response.status_code}")
 
         # --- 5. Parse JSON ---
         try:
             data = response.json()
         except Exception as e:
-            print(f"PrizePicks: failed to parse JSON — {e}")
-            return pd.DataFrame()
+            return _stale_cache_fallback(f"failed to parse JSON — {e}")
 
         # --- 6. Build clean rows (always includes all line types) ---
         clean_lines = self._parse_response(data)
 
         if not clean_lines:
-            print("PrizePicks: 0 lines parsed")
-            return pd.DataFrame()
+            return _stale_cache_fallback("0 lines parsed")
 
         # --- 7. Save ALL lines to disk cache (including alts) ---
         self._save_cache(clean_lines, league_filter)
@@ -422,6 +426,17 @@ class PrizePicksClient:
                 return None
         except Exception as e:
             print(f"   Warning: could not read PP cache: {e}")
+            return None
+
+    def _load_stale_cache(self, league_filter=None):
+        """Return stale cache data regardless of age (fallback when live fetch fails)."""
+        cache_file = _cache_file_for_league(league_filter)
+        if not os.path.exists(cache_file):
+            return None
+        try:
+            with open(cache_file, 'r') as f:
+                return json.load(f)
+        except Exception:
             return None
 
     def _save_cache(self, data_list, league_filter=None):

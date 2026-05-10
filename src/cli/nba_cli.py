@@ -33,11 +33,32 @@ from src.sports.nba.scanner import (
     refresh_injuries, get_player_status, auto_refresh_data, get_all_projections
 )
 
+# Module-level cache: data and models are loaded once per session.
+_SESSION_DF      = None
+_SESSION_MODELS  = None
+_SESSION_LOADED  = False
+
 warnings.filterwarnings('ignore')
 
 # Project root is 3 levels up from src/cli/nba_cli.py
 _BASE      = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUTPUT_DIR = os.path.join(_BASE, 'output', 'nba', 'scans')
+
+
+def _ensure_session_data():
+    """Load data and models once; reuse for every scanner call in the session."""
+    global _SESSION_DF, _SESSION_MODELS, _SESSION_LOADED
+    if _SESSION_LOADED:
+        return _SESSION_DF, _SESSION_MODELS
+    refresh_injuries()
+    df = load_data()
+    if df is not None:
+        df = auto_refresh_data(df)
+    models = load_models()
+    _SESSION_DF     = df
+    _SESSION_MODELS = models
+    _SESSION_LOADED = True
+    return df, models
 
 
 # --- HELPER: RUN AI PREDICTIONS ---
@@ -53,11 +74,7 @@ def get_ai_predictions():
     get_all_projections(), so results here are guaranteed to match the
     AI Scanner and Player Scout output exactly.
     """
-    refresh_injuries()
-    df_history = load_data()
-    if df_history is not None:
-        df_history = auto_refresh_data(df_history)
-    models = load_models()
+    df_history, models = _ensure_session_data()
 
     if df_history is None or not models:
         return pd.DataFrame()
@@ -394,7 +411,8 @@ def run_odds_scanner():
 # --- TOOL 3: AI SCANNER ---
 def run_ai_scanner():
     try:
-        ai_scanner_module.main()
+        df, models = _ensure_session_data()
+        ai_scanner_module.main_with_data(df, models)
     except Exception as e:
         print(f"Error running AI Scanner: {e}")
         input("Press Enter...")
@@ -421,6 +439,8 @@ def run_builder():
         print(f"Builder import error: {e}")
     except Exception as e:
         print(f"\nBuilder error: {e}")
+    global _SESSION_LOADED
+    _SESSION_LOADED = False  # force reload on next scan
     input("\nPress Enter to continue...")
 
 
@@ -440,6 +460,8 @@ def run_feature_engineering():
     except Exception as e:
         print(f"\nError: {e}")
         import traceback; traceback.print_exc()
+    global _SESSION_LOADED
+    _SESSION_LOADED = False  # force reload on next scan (dataset rebuilt)
     input("\nPress Enter to continue...")
 
 
@@ -457,6 +479,8 @@ def run_training():
     except Exception as e:
         print(f"\nTraining error: {e}")
         import traceback; traceback.print_exc()
+    global _SESSION_LOADED
+    _SESSION_LOADED = False  # force model reload on next scan
     input("\nPress Enter to continue...")
 
 

@@ -17,6 +17,7 @@ Usage:
 
 import requests
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 INJURY_URL = "https://www.espn.com/nba/injuries"
 CBS_INJURY_URL = "https://www.cbssports.com/nba/injuries/"
@@ -188,21 +189,31 @@ def get_injury_report():
     """
     print("Loading injuries...")
 
-    # Primary: ESPN
-    injury_data = _scrape_espn()
+    injury_data = {}
+    cbs_data = {}
 
-    # Supplemental: CBS (fills gaps — only adds truly new players)
-    try:
-        cbs_data = _scrape_cbs()
-        existing_names = set(injury_data.keys())
-        added = 0
-        for name, status in cbs_data.items():
-            if not _already_tracked(name, existing_names):
-                injury_data[name] = status
-                existing_names.add(name)
-                added += 1
-    except Exception:
-        pass  # CBS is best-effort
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            executor.submit(_scrape_espn): "espn",
+            executor.submit(_scrape_cbs): "cbs",
+        }
+        for future in as_completed(futures):
+            source = futures[future]
+            try:
+                result = future.result()
+                if source == "espn":
+                    injury_data = result
+                else:
+                    cbs_data = result
+            except Exception:
+                pass
+
+    # Merge CBS into ESPN — only add truly new players
+    existing_names = set(injury_data.keys())
+    for name, status in cbs_data.items():
+        if not _already_tracked(name, existing_names):
+            injury_data[name] = status
+            existing_names.add(name)
 
     out_count = sum(1 for s in injury_data.values() if s == "OUT")
     print(f"Injuries: {len(injury_data)} reports ({out_count} OUT)")
