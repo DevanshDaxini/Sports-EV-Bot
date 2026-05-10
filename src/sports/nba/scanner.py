@@ -53,11 +53,6 @@ ACCURACY_LOG_FILE  = os.path.join(PROJ_DIR, 'accuracy_log.csv')
 
 warnings.filterwarnings('ignore')
 
-# Playoffs run April-June. Pace drops ~4.5% vs regular season.
-# Apply this multiplier to continuous full-game projections during that window.
-PLAYOFF_MONTHS = {4, 5, 6}
-PLAYOFF_PACE_FACTOR = 0.955
-
 # Minimum edge (%) required to surface a bet. Smaller edges are noise.
 MIN_EDGE_PCT = 2.5
 
@@ -860,92 +855,9 @@ _BUILD_CACHE_KEY    = None  # (max_date, n_rows)
 _BUILD_CACHE_RESULT = None  # (latest_rows_map, team_rosters_map)
 
 
-def is_playoff_season():
-    """Check if current date falls in playoff window (Apr-Jun)."""
-    return datetime.now().month in {4, 5, 6}
-
-
-def rebuild_playoff_rolling_features(df_history):
-    """
-    During playoffs (Apr-Jun), recalculate rolling features using ONLY playoff games.
-    Regular season rolling stats don't represent playoff form (higher mins, intensity).
-    Returns modified dataframe with playoff-appropriate rolling averages.
-    """
-    if not is_playoff_season():
-        return df_history  # Return unmodified if not in playoff season
-
-    _log("...Rebuilding rolling features for playoff season")
-
-    df = df_history.copy()
-    season_col = 'SEASON_YEAR' if 'SEASON_YEAR' in df.columns else 'SEASON_ID'
-    current_season = df[season_col].max()
-
-    # Detect actual playoff series: May 1+ (skip early April play-in/weak games)
-    # Real NBA playoffs start early May for first round
-    df['IS_PLAYOFF'] = (df['GAME_DATE'] >= pd.to_datetime('2026-05-01')) & (df['GAME_DATE'].dt.month.isin([5, 6]))
-
-    if not df['IS_PLAYOFF'].any():
-        return df  # No playoff data yet
-
-    _log(f"   Found {len(df[df['IS_PLAYOFF']])} playoff player-games")
-
-    # For each player, recalculate L5/L10 using ONLY their playoff games
-    ROLLING_STATS = ['PTS', 'REB', 'AST', 'FGA', 'FG3A', 'FTA', 'TOV', 'FGM', 'FTM', 'FG3M', 'STL', 'BLK', 'MIN']
-
-    for pid in df[df['IS_PLAYOFF']]['PLAYER_ID'].unique():
-        # Get all games for this player, sorted by date (keep original index)
-        player_mask = df['PLAYER_ID'] == pid
-        player_df = df[player_mask].sort_values('GAME_DATE')
-
-        if len(player_df) < 2:
-            continue
-
-        # Get original indices to update df correctly
-        original_indices = player_df.index.tolist()
-
-        # For each stat, compute rolling features
-        for stat in ROLLING_STATS:
-            if stat not in df.columns:
-                continue
-
-            # For each playoff game by this player
-            for i, (orig_idx, (_, row)) in enumerate(zip(original_indices, player_df.iterrows())):
-                if not row['IS_PLAYOFF']:
-                    continue
-
-                # Get all PREVIOUS playoff games for this player (not including current)
-                prev_games = player_df[(player_df['GAME_DATE'] < row['GAME_DATE']) & (player_df['IS_PLAYOFF'])]
-
-                if len(prev_games) == 0:
-                    continue
-
-                prev_vals = prev_games[stat].values
-
-                # L5: mean of last 5
-                col_l5 = f'{stat}_L5'
-                if col_l5 in df.columns:
-                    val = prev_vals[-5:].mean() if len(prev_vals) > 0 else np.nan
-                    df.at[orig_idx, col_l5] = val
-
-                # L10: mean of last 10
-                col_l10 = f'{stat}_L10'
-                if col_l10 in df.columns:
-                    val = prev_vals[-10:].mean() if len(prev_vals) > 0 else np.nan
-                    df.at[orig_idx, col_l10] = val
-
-                # L10_Median
-                col_med = f'{stat}_L10_Median'
-                if col_med in df.columns:
-                    val = np.median(prev_vals[-10:]) if len(prev_vals) > 0 else np.nan
-                    df.at[orig_idx, col_med] = val
-
-    return df
-
-
 def build_data_cache(df_history):
     """
     Pre-indexes the dataframe for O(1) lookups.
-    During playoffs, rebuilds rolling features to use playoff-only data (not full season).
     Returns:
         latest_rows_map: {pid: row_dict}
         team_rosters_map: {team_id: [pid, pid, ...]}
@@ -956,9 +868,6 @@ def build_data_cache(df_history):
         return _BUILD_CACHE_RESULT
 
     _log("...Building data cache for fast lookups")
-
-    # Rebuild rolling features for playoff season
-    df_history = rebuild_playoff_rolling_features(df_history)
 
     # Filter to current season only — prevents traded players from inflating
     # team rosters (e.g. Deandre Ayton still mapping to the Suns)
@@ -1518,11 +1427,7 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
 
 
 def _scan_all_impl(df_history, models, is_tomorrow=False, max_days_forward=7):
-    global _QUIET, _BUILD_CACHE_KEY, _BUILD_CACHE_RESULT
-    # Clear cache to force rebuild_playoff_rolling_features to run each scan
-    _BUILD_CACHE_KEY = None
-    _BUILD_CACHE_RESULT = None
-
+    global _QUIET
     refresh_injuries()
     n_out = sum(1 for s in INJURY_DATA.values() if s == 'OUT')
     n_gtd = sum(1 for s in INJURY_DATA.values() if s != 'OUT')
@@ -1857,10 +1762,6 @@ def _scan_all_impl(df_history, models, is_tomorrow=False, max_days_forward=7):
                         proj = float(np.expm1(max(raw, 0))) * LOG_CALIBRATION.get(target, 1.0)
                     else:
                         proj = max(raw, 0.0)
-                    # Playoff pace adjustment: regular season models overpredict
-                    # volume stats during slower playoff pace (Apr-Jun).
-                    if datetime.now().month in PLAYOFF_MONTHS and target not in LOG_TRANSFORM_TARGETS:
-                        proj *= PLAYOFF_PACE_FACTOR
                     player_predictions[target] = proj
                 except Exception:
                     # Model mismatch or missing features
@@ -2497,11 +2398,6 @@ def _calculate_injury_adjustments(df_history, team_id, active_pid):
 
 
 def scout_player(df_history, models):
-    global _BUILD_CACHE_KEY, _BUILD_CACHE_RESULT
-    # Clear cache to force rebuild_playoff_rolling_features to run
-    _BUILD_CACHE_KEY = None
-    _BUILD_CACHE_RESULT = None
-
     print("\n--- PLAYER SCOUT ---")
     refresh_injuries()
     d_choice = input("Select Start Date (1=Today, 2=Tomorrow): ").strip()
