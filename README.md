@@ -1,24 +1,24 @@
 # Sports EV Bot
 
-A multi-sport prop betting analysis engine. Uses XGBoost regression models trained on historical data to project player stats, then compares those projections against PrizePicks lines and FanDuel odds to find positive expected value (+EV) opportunities.
+A multi-sport prop betting analysis engine. Uses XGBoost + LightGBM ensemble models trained on historical data to project player stats, then compares those projections against PrizePicks lines and FanDuel odds to find positive expected value (+EV) opportunities.
 
-Supports NBA (17 stat models) and Tennis (7 market models).
+Supports NBA (21 stat models) and Tennis (7 market models).
 
 ---
 
 ## How It Works
 
-The system runs three independent analysis layers that can be used alone or combined:
+Three independent analysis layers, usable alone or combined:
 
 ### 1. AI Scanner
 
-Trains XGBoost models on historical player data to predict stat lines. For NBA, it uses nba_api game logs with 100+ engineered features (rolling averages, opponent-allowed stats by position, usage rate, rest days, home/away splits). For Tennis, it uses Jeff Sackmann's open match data with 150+ features (surface, rank, H2H, recent form, fatigue).
+Trains XGBoost + LightGBM ensemble models on historical player data to predict stat lines. For NBA, uses nba_api game logs with 451 engineered features per player-game (rolling averages, streak/consistency signals, opponent-allowed stats by position, usage rate, expected possessions, rest days, home/away splits). For Tennis, uses Jeff Sackmann's open match data with 150+ features (surface, rank, H2H, recent form, fatigue).
 
 Each model outputs a projected stat value. The scanner compares this projection to the PrizePicks line and shows the delta.
 
 ### 2. Odds Scanner
 
-Fetches live odds from FanDuel via the-odds-api and compares them to PrizePicks lines. The analyzer removes the vig from FanDuel two-way markets to calculate the true implied probability, then adjusts for any line difference between platforms using logarithmic scaling. Dynamic per-stat thresholds control how large a line discrepancy is allowed before filtering it out.
+Fetches live odds from FanDuel via the-odds-api and compares them to PrizePicks lines. Removes the vig from FanDuel two-way markets to calculate the true implied probability, then adjusts for any line difference between platforms using logarithmic scaling. Dynamic per-stat thresholds control how large a line discrepancy is allowed before filtering it out.
 
 Output: a ranked list of plays sorted by implied win percentage.
 
@@ -48,12 +48,13 @@ sports_ev_bot/
 │   │   └── visualizer.py            # accuracy plot generation
 │   └── sports/
 │       ├── nba/
-│       │   ├── builder.py           # download game logs via nba_api
-│       │   ├── features.py          # engineer 100+ training features
-│       │   ├── train.py             # train 17 XGBoost models
+│       │   ├── builder.py           # download game logs + 1H splits via nba_api
+│       │   ├── features.py          # engineer 451 training features
+│       │   ├── train.py             # train 21 XGBoost+LightGBM ensemble models
 │       │   ├── scanner.py           # AI scanner, player scout, game scanning
 │       │   ├── injuries.py          # live injury scraper (ESPN + CBS)
 │       │   ├── grader.py            # backtest grading
+│       │   ├── backtester.py        # historical backtesting
 │       │   ├── config.py            # NBA-specific constants
 │       │   └── mappings.py          # stat name normalization maps
 │       └── tennis/
@@ -83,38 +84,67 @@ sports_ev_bot/
 
 ## NBA Models
 
-17 XGBoost regression models. Trained on ~3 seasons of game logs.
+21 XGBoost + LightGBM ensemble models (60% XGBoost / 40% LightGBM). Trained on 4 seasons of game logs with exponential recency sample weights and Optuna Bayesian hyperparameter optimization.
 
-| Target | MAE   | R2    | Directional Accuracy |
-|--------|-------|-------|----------------------|
-| PTS    | 4.75  | 0.469 | 74.4%                |
-| FGM    | 1.83  | 0.421 | 73.6%                |
-| PA     | 5.19  | 0.534 | 75.5%                |
-| PR     | 5.62  | 0.477 | 74.8%                |
-| PRA    | 6.09  | 0.524 | 76.2%                |
-| FGA    | 2.79  | 0.576 | 79.5%                |
-| FG3A   | 1.56  | 0.519 | 75.2%                |
-| FTA    | 1.75  | 0.359 | 71.5%                |
-| FG3M   | 0.96  | 0.281 | 62.2%                |
-| RA     | 2.67  | 0.430 | 73.4%                |
-| FTM    | 1.46  | 0.351 | 62.0%                |
-| REB    | 1.95  | 0.411 | 71.4%                |
-| AST    | 1.42  | 0.473 | 72.8%                |
-| STL    | 0.77  | 0.077 | 71.2%                |
-| TOV    | 0.94  | 0.261 | 62.0%                |
-| SB     | 0.97  | 0.121 | 52.6%                |
-| BLK    | 0.57  | 0.192 | 35.0%                |
+| Target  | MAE   | R²    |
+|---------|-------|-------|
+| PTS     | 4.77  | 0.461 |
+| REB     | 1.94  | 0.411 |
+| AST     | 1.43  | 0.465 |
+| FG3M    | 0.94  | 0.240 |
+| FG3A    | 1.56  | 0.514 |
+| BLK     | 0.54  | 0.164 |
+| STL     | 0.77  | 0.021 |
+| TOV     | 0.96  | 0.203 |
+| PRA     | 6.09  | 0.516 |
+| PR      | 5.62  | 0.471 |
+| PA      | 5.21  | 0.523 |
+| RA      | 2.66  | 0.429 |
+| SB      | 0.98  | 0.068 |
+| FGM     | 1.84  | 0.413 |
+| FGA     | 2.79  | 0.570 |
+| FTM     | 1.48  | 0.348 |
+| FTA     | 1.77  | 0.360 |
+| FPTS    | 7.77  | 0.459 |
+| PTS_1H  | 3.12  | 0.352 |
+| PRA_1H  | 3.84  | 0.432 |
+| FPTS_1H | 4.93  | 0.378 |
 
-MAE = Mean Absolute Error. R2 = coefficient of determination. Directional Accuracy = percentage of games where the model correctly predicted Over vs Under relative to the PrizePicks line.
+MAE = Mean Absolute Error. R² = coefficient of determination. Metrics from held-out test set (most recent 30% of games, including 2025-26 playoffs).
 
-### Key Features Used
+### Key Features (451 total)
 
-- Rolling averages (season, last 10, last 5 games)
-- Opponent-allowed stats filtered by position (G/F/C)
-- Usage rate and missing usage from injured teammates
-- Schedule density (back-to-back, 4-in-6, days rest)
-- Home/away splits
-- Feature leakage prevention: training excludes the target game's stats from all rolling windows
+**Rolling averages**
+- Season, L20 (EWM), L10, L5 — for all primary stats
+- L5 and L10 medians for robustness to outliers
+
+**Streak & consistency signals**
+- `{stat}_STREAK` = L5 avg − L20 avg (hot/cold indicator)
+- `{stat}_CONSISTENCY` = L5 median / season avg (reliability signal)
+
+**Expected possessions**
+- `EXP_POSS` = team pace / 100 × usage rate / 100 × L5 minutes
+- `EXP_POSS_SEASON` = same but using season-average minutes
+
+**Opponent defense**
+- Opponent-allowed stats filtered by position (G / F / C)
+- Season-level and L5-level opponent ratings
+
+**Context**
+- Usage rate with transfer from injured teammates
+- Schedule density: back-to-back, 4-in-6, days rest
+- Home / away splits
+- 1st-half splits (for _1H targets)
+
+**Leakage prevention**
+- Training excludes the target game's own stats from all rolling windows
+
+### Model Architecture
+
+- **Ensemble**: 60% XGBoost / 40% LightGBM weighted average
+- **Recency weights**: `exp(-0.001 × days_ago)` — exponential decay so recent games matter more
+- **Hyperparameter tuning**: Optuna Bayesian optimization, 30 trials per target, 3-fold TimeSeriesSplit cross-validation
+- **Log transform**: applied to low-count targets (FG3M, BLK, STL, TOV, SB) to stabilize variance
 
 ---
 
@@ -122,7 +152,7 @@ MAE = Mean Absolute Error. R2 = coefficient of determination. Directional Accura
 
 7 XGBoost regression models. Trained on ~1M ATP/WTA matches.
 
-| Target          | MAE   | R2    | Directional Accuracy |
+| Target          | MAE   | R²    | Directional Accuracy |
 |-----------------|-------|-------|----------------------|
 | Total Sets      | 0.30  | 0.696 | 85.0%                |
 | Total Games     | 2.99  | 0.697 | 84.0%                |
@@ -167,8 +197,8 @@ If PrizePicks has a lower line than FanDuel, only the Over side is shown. If hig
 ### Installation
 
 ```bash
-git clone https://github.com/DevanshDaxini/nba_ev_bot.git
-cd nba_ev_bot
+git clone https://github.com/DevanshDaxini/Sports-EV-Bot.git
+cd Sports-EV-Bot
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -184,15 +214,15 @@ ODDS_API_KEY=your_key_here
 
 Run these in order from the main menu:
 
-1. Build Data -- downloads ~3 seasons of game logs via nba_api
-2. Engineer Features -- computes 100+ features per player-game
-3. Train Models -- trains 17 XGBoost models (~5 min)
+1. **Build Data** — downloads 4 seasons of game logs + 1st-half splits via nba_api
+2. **Engineer Features** — computes 451 features per player-game
+3. **Train Models** — trains 21 XGBoost + LightGBM ensemble models (~10 min)
 
 ### First-time Setup (Tennis)
 
-1. Build Data -- downloads ATP/WTA match history from Sackmann GitHub
-2. Engineer Features -- computes 150+ features per match (~5 min)
-3. Train Models -- trains 7 XGBoost models (~3 min)
+1. **Build Data** — downloads ATP/WTA match history from Sackmann GitHub
+2. **Engineer Features** — computes 150+ features per match (~5 min)
+3. **Train Models** — trains 7 XGBoost models (~3 min)
 
 ---
 
@@ -204,9 +234,9 @@ python main.py
 
 Select a sport, then choose a tool:
 
-- **Super Scanner** -- finds plays where math odds and AI projection agree
-- **Odds Scanner** -- pure FanDuel vs PrizePicks line comparison
-- **AI Scanner** -- standalone AI predictions with player scouting
+- **Super Scanner** — finds plays where math odds and AI projection agree
+- **Odds Scanner** — pure FanDuel vs PrizePicks line comparison
+- **AI Scanner** — standalone AI predictions with player scouting
 
 The player scout shows per-stat projections, PrizePicks lines (including goblin/demon alt lines marked with (G)/(D)), FanDuel-implied win percentages, and Over/Under recommendations.
 
@@ -216,7 +246,7 @@ The player scout shows per-stat projections, PrizePicks lines (including goblin/
 
 - **PrizePicks**: partner API, free, no key needed. Cached for 10 minutes.
 - **FanDuel (via the-odds-api)**: requires API key, costs credits per call. Cached for 10 minutes. The Odds Scanner auto-detects the active game slate date to minimize unnecessary calls.
-- **nba_api**: free, no key needed. Used for game schedules and historical data. Features a custom network resilience layer with 30-second timeouts and automatic 5-attempt rapid retries to handle frequent `stats.nba.com` connection blackholing.
+- **nba_api**: free, no key needed. Used for game schedules and historical data. Features a custom resilience layer with 30-second timeouts and automatic 5-attempt retries to handle frequent `stats.nba.com` connection issues.
 - **ESPN/CBS Sports**: scraped for live injury reports. No key needed.
 
 ---
