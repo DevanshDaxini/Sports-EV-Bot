@@ -492,6 +492,39 @@ def add_turnover_specific_features(df):
     return df
 
 
+def add_streak_consistency_features(df):
+    print("...Adding Streak & Consistency Features")
+    df = df.copy()
+    streak_stats = ['PTS', 'REB', 'AST', 'FG3M', 'FGA', 'BLK', 'STL', 'TOV',
+                    'FPTS', 'PRA', 'USAGE_RATE', 'MIN', 'GAME_SCORE']
+    for stat in streak_stats:
+        l5_col     = f'{stat}_L5'
+        l20_col    = f'{stat}_L20'
+        l5_med_col = f'{stat}_L5_Median'
+        season_col = f'{stat}_Season'
+        if l5_col in df.columns and l20_col in df.columns:
+            df[f'{stat}_STREAK'] = (df[l5_col] - df[l20_col]).fillna(0)
+        if l5_med_col in df.columns and season_col in df.columns:
+            df[f'{stat}_CONSISTENCY'] = (
+                df[l5_med_col] / (df[season_col].abs() + 0.1)
+            ).clip(0, 3).fillna(1.0)
+    return df
+
+
+def add_expected_possessions_feature(df):
+    print("...Adding Expected Possessions Feature")
+    df = df.copy()
+    if all(c in df.columns for c in ['PACE_ROLLING', 'USAGE_RATE_L5', 'MIN_Season']):
+        df['EXP_POSS'] = (
+            (df['PACE_ROLLING'] / 100) * (df['USAGE_RATE_L5'] / 100) * df['MIN_Season']
+        ).clip(0, 30)
+    if all(c in df.columns for c in ['PACE_ROLLING', 'USAGE_RATE_Season', 'MIN_Season']):
+        df['EXP_POSS_SEASON'] = (
+            (df['PACE_ROLLING'] / 100) * (df['USAGE_RATE_Season'] / 100) * df['MIN_Season']
+        ).clip(0, 30)
+    return df
+
+
 def add_rebound_specific_features(df):
     """
     ENHANCED: Advanced rebounding features to improve REB model from 72% → 78%+
@@ -834,6 +867,8 @@ def main():
     df = add_rookie_features(df)
     df = add_momentum_features(df)
     df = add_efficiency_signals(df)
+    df = add_streak_consistency_features(df)
+    df = add_expected_possessions_feature(df)
 
     print("\n--- STAGE 5: MATCHUP FEATURES ---")
     df = add_defense_vs_position(df)

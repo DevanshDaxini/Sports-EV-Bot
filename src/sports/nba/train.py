@@ -21,6 +21,7 @@ Usage:
 import pandas as pd
 import numpy as np
 import xgboost as xgb
+import lightgbm as lgb
 import os
 import csv
 from datetime import datetime
@@ -71,6 +72,35 @@ TARGET_HYPERPARAMS = {
     'FTM': _MEDIUM, 'RA': _MEDIUM,
     'FG3M': _LOW, 'STL': _LOW, 'TOV': _LOW, 'BLK': _LOW, 'SB': _LOW,
 }
+
+# --- LIGHTGBM HYPERPARAMETER TIERS (mirrored from XGBoost tiers) ---
+_LGBM_HIGH = {
+    'n_estimators': 1000, 'learning_rate': 0.04, 'max_depth': 6, 'num_leaves': 50,
+    'subsample': 0.85, 'subsample_freq': 5, 'colsample_bytree': 0.75,
+    'min_child_samples': 20, 'min_split_gain': 0.05,
+    'reg_alpha': 0.1, 'reg_lambda': 1.5, 'verbose': -1, 'n_jobs': -1,
+}
+_LGBM_MEDIUM = {
+    'n_estimators': 800, 'learning_rate': 0.03, 'max_depth': 5, 'num_leaves': 25,
+    'subsample': 0.80, 'subsample_freq': 5, 'colsample_bytree': 0.70,
+    'min_child_samples': 50, 'min_split_gain': 0.10,
+    'reg_alpha': 0.2, 'reg_lambda': 1.5, 'verbose': -1, 'n_jobs': -1,
+}
+_LGBM_LOW = {
+    'n_estimators': 600, 'learning_rate': 0.02, 'max_depth': 4, 'num_leaves': 15,
+    'subsample': 0.70, 'subsample_freq': 5, 'colsample_bytree': 0.60,
+    'min_child_samples': 100, 'min_split_gain': 0.50,
+    'reg_alpha': 0.5, 'reg_lambda': 2.0, 'verbose': -1, 'n_jobs': -1,
+}
+LGBM_HYPERPARAMS = {
+    'PTS': _LGBM_HIGH, 'FGM': _LGBM_HIGH, 'FGA': _LGBM_HIGH, 'PA': _LGBM_HIGH,
+    'PR': _LGBM_HIGH, 'PRA': _LGBM_HIGH, 'FPTS': _LGBM_HIGH,
+    'PTS_1H': _LGBM_HIGH, 'PRA_1H': _LGBM_HIGH, 'FPTS_1H': _LGBM_HIGH,
+    'REB': _LGBM_MEDIUM, 'AST': _LGBM_MEDIUM, 'FG3A': _LGBM_MEDIUM,
+    'FTA': _LGBM_MEDIUM, 'FTM': _LGBM_MEDIUM, 'RA': _LGBM_MEDIUM,
+    'FG3M': _LGBM_LOW, 'STL': _LGBM_LOW, 'TOV': _LGBM_LOW,
+    'BLK': _LGBM_LOW, 'SB': _LGBM_LOW,
+}
 # -------------------------------------------------------------------------
 
 
@@ -79,7 +109,11 @@ def get_features_for_target(target):
     core = [
         'MIN_Season', 'MIN_L5', 'MIN_L10', 'USAGE_RATE_Season', 'USAGE_RATE_L5', 'USAGE_RATE_L10',
         'DAYS_REST', 'IS_HOME', 'GAMES_7D', 'IS_4_IN_6', 'IS_B2B', 'IS_FRESH',
-        'PACE_ROLLING', 'USAGE_VACUUM', 'STAR_COUNT', 'GAME_SCORE_Season', 'GAME_SCORE_L5'
+        'PACE_ROLLING', 'USAGE_VACUUM', 'STAR_COUNT', 'GAME_SCORE_Season', 'GAME_SCORE_L5',
+        # New: expected possessions and streak/consistency signals
+        'EXP_POSS', 'EXP_POSS_SEASON',
+        'MIN_STREAK', 'USAGE_RATE_STREAK', 'USAGE_RATE_CONSISTENCY',
+        'GAME_SCORE_STREAK', 'GAME_SCORE_CONSISTENCY',
     ]
 
     if target in ['PTS', 'FGM', 'FGA', 'FTM', 'FTA', 'FG3M', 'FG3A']:
@@ -107,6 +141,9 @@ def get_features_for_target(target):
     for stat in target_stats:
         for variant in ['_Season', '_L5', '_L10', '_L20', '_L5_Median', '_L10_Median']:
             features.append(f'{stat}{variant}')
+        # Streak (L5−L20 delta) and consistency (L5_Median / Season ratio)
+        features.append(f'{stat}_STREAK')
+        features.append(f'{stat}_CONSISTENCY')
         if stat in ['PTS', 'REB', 'AST', 'FG3M', 'FGA', 'BLK', 'STL', 'TOV',
                     'FGM', 'FTM', 'FTA', 'PRA', 'PR', 'PA', 'RA', 'SB']:
             features.append(f'OPP_{stat}_ALLOWED')
@@ -203,6 +240,11 @@ def train_and_evaluate():
             print(f"  -> SKIP (insufficient non-NaN rows: train={len(X_train)}, test={len(X_test)})")
             continue
 
+        # Recency sample weights: exponential decay so recent games count more
+        max_train_date = train_df.loc[train_valid, 'GAME_DATE'].max()
+        days_ago = (max_train_date - train_df.loc[train_valid, 'GAME_DATE']).dt.days
+        sample_weights = np.exp(-0.001 * days_ago.values)
+
         # Log-transform zero-inflated count stats
         log_transform = target in LOG_TRANSFORM_TARGETS
         if log_transform:
@@ -212,19 +254,32 @@ def train_and_evaluate():
             y_train_fit = y_train
             y_test_fit  = y_test
 
+        # --- XGBoost ---
         params = TARGET_HYPERPARAMS.get(target, _MEDIUM)
-        model  = xgb.XGBRegressor(**params)
-        model.fit(
+        xgb_model = xgb.XGBRegressor(**params)
+        xgb_model.fit(
             X_train, y_train_fit,
+            sample_weight=sample_weights,
             eval_set=[(X_test, y_test_fit)],
             verbose=False
         )
+        xgb_raw = xgb_model.predict(X_test)
 
-        raw_preds = model.predict(X_test)
+        # --- LightGBM ---
+        lgbm_params = LGBM_HYPERPARAMS.get(target, _LGBM_MEDIUM)
+        lgbm_model = lgb.LGBMRegressor(**lgbm_params)
+        lgbm_model.fit(X_train, y_train_fit, sample_weight=sample_weights)
+        lgbm_raw = lgbm_model.predict(X_test)
+
+        # --- Ensemble: 60% XGBoost + 40% LightGBM ---
+        raw_preds = 0.6 * xgb_raw + 0.4 * lgbm_raw
+
         if log_transform:
             predictions = np.expm1(np.clip(raw_preds, 0, 10))
         else:
             predictions = np.clip(raw_preds, 0, None)
+
+        model = xgb_model  # keep xgb handle for save / feature_names_in_
 
         mae = mean_absolute_error(y_test, predictions)
         r2  = r2_score(y_test, predictions)
@@ -249,7 +304,8 @@ def train_and_evaluate():
         print(f"  -> MAE: {mae:.2f}  |  R²: {r2:.3f}")
         print(f"  -> Dir Acc (vs L20 median): {dir_acc:.1%}  |  Legacy (vs global median): {legacy_acc:.1%}")
 
-        model.save_model(os.path.join(MODEL_DIR, f"{target}_model.json"))
+        xgb_model.save_model(os.path.join(MODEL_DIR, f"{target}_model.json"))
+        lgbm_model.booster_.save_model(os.path.join(MODEL_DIR, f"{target}_model_lgbm.txt"))
 
     metrics_file = os.path.join(MODEL_DIR, 'model_metrics.csv')
     with open(metrics_file, 'w', newline='') as f:
