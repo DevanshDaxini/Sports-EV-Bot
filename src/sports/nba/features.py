@@ -88,30 +88,54 @@ def add_advanced_stats(df):
 
 
 def add_rolling_features(df):
-    print("...Calculating Rolling Averages (Rookie-Friendly)")
+    print("...Calculating Rolling Averages (Recency-Weighted)")
     df = df.copy()
     df['CAREER_GAMES'] = df.groupby('PLAYER_ID').cumcount() + 1
     grouped = df.groupby('PLAYER_ID')
     base_stats = ['PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL', 'BLK', 'TOV', 'FGM', 'FGA', 'FTM', 'FTA']
     stats_to_roll = base_stats + ['MIN', 'GAME_SCORE', 'USAGE_RATE', 'FPTS']
     
-    # Add 1H equivalents (Only keeping highly liquid markets to reduce noise)
-    stats_to_roll.extend(['PTS_1H', 'MIN_1H', 'FPTS_1H'])
-    
+    # Add 1H equivalents only if 1H data was loaded
+    stats_to_roll.extend([s for s in ['PTS_1H', 'MIN_1H', 'FPTS_1H'] if s in df.columns])
+
     for combo in ['PRA', 'PR', 'PA', 'RA', 'SB', 'PRA_1H', 'PR_1H', 'PA_1H', 'RA_1H', 'SB_1H']:
         if combo in df.columns:
             stats_to_roll.append(combo)
+
+    # Deduplicate and filter to columns that actually exist
+    stats_to_roll = [s for s in dict.fromkeys(stats_to_roll) if s in df.columns]
+
+    # Mask near-DNP games so blowout bench rides don't poison rolling windows.
+    # Rows with MIN < 5 contribute nothing useful to future-game predictions.
+    DNP_MIN_THRESHOLD = 5
+    qualified = df.copy()
+    qualified.loc[qualified['MIN'] < DNP_MIN_THRESHOLD, stats_to_roll] = float('nan')
+    grouped_q = qualified.groupby('PLAYER_ID')
+
     rolling_data = {}
     for stat in stats_to_roll:
-        # Averages
-        rolling_data[f'{stat}_L5']     = grouped[stat].transform(lambda x: x.shift(1).rolling(5, min_periods=3).mean())
-        rolling_data[f'{stat}_L10']    = grouped[stat].transform(lambda x: x.shift(1).rolling(10, min_periods=5).mean())
-        rolling_data[f'{stat}_L20']    = grouped[stat].transform(lambda x: x.shift(1).rolling(20, min_periods=10).mean())
-        rolling_data[f'{stat}_Season'] = grouped[stat].transform(lambda x: x.shift(1).expanding(min_periods=1).mean())
-        
-        # Medians (Fixes recency bias outlilers)
-        rolling_data[f'{stat}_L5_Median'] = grouped[stat].transform(lambda x: x.shift(1).rolling(5, min_periods=3).median())
-        rolling_data[f'{stat}_L10_Median'] = grouped[stat].transform(lambda x: x.shift(1).rolling(10, min_periods=5).median())
+        src = grouped_q
+        # Short-window averages (flat rolling — unchanged)
+        rolling_data[f'{stat}_L5']  = src[stat].transform(lambda x: x.shift(1).rolling(5,  min_periods=3).mean())
+        rolling_data[f'{stat}_L10'] = src[stat].transform(lambda x: x.shift(1).rolling(10, min_periods=5).mean())
+
+        # _L20: exponentially weighted mean (span=10, ~20-game half-life).
+        # Puts 2× more weight on the most recent game vs. 20 games ago,
+        # so hot/cold streaks flow through to predictions instead of being
+        # swamped by a flat equal-weight window.
+        rolling_data[f'{stat}_L20'] = src[stat].transform(
+            lambda x: x.shift(1).ewm(span=10, min_periods=5, adjust=False).mean()
+        )
+
+        # _Season: long EWMA (span=30) gives a stable baseline while still
+        # de-emphasising a slow early-season start.
+        rolling_data[f'{stat}_Season'] = src[stat].transform(
+            lambda x: x.shift(1).ewm(span=30, min_periods=1, adjust=False).mean()
+        )
+
+        # Medians (flat rolling — unchanged)
+        rolling_data[f'{stat}_L5_Median']  = src[stat].transform(lambda x: x.shift(1).rolling(5,  min_periods=3).median())
+        rolling_data[f'{stat}_L10_Median'] = src[stat].transform(lambda x: x.shift(1).rolling(10, min_periods=5).median())
     df = pd.concat([df, pd.DataFrame(rolling_data, index=df.index)], axis=1)
     return df
 
@@ -158,16 +182,17 @@ def add_defense_vs_position(df):
     print("...Calculating Defense vs. Position (L10 Window)")
     df = df.copy()
     defense_group = df.groupby(['OPPONENT', 'POSITION'])
+    available_stats = [s for s in TARGET_STATS if s in df.columns]
     new_def_cols = {}
-    for stat in TARGET_STATS:
+    for stat in available_stats:
         col_name = f'OPP_{stat}_ALLOWED'
         new_def_cols[col_name] = defense_group[stat].transform(
             lambda x: x.shift(1).rolling(10, min_periods=10).mean())
     df = pd.concat([df, pd.DataFrame(new_def_cols, index=df.index)], axis=1)
-    
+
     # Normalize DvP vs League Average (DvP Diff)
     # "Allowed 25 pts" means nothing if league avg is 26.
-    for stat in TARGET_STATS:
+    for stat in available_stats:
         col_name = f'OPP_{stat}_ALLOWED'
         league_pos_avg = df.groupby(['POSITION', 'SEASON_ID'])[stat].transform('median')
         df[col_name] = df[col_name].fillna(league_pos_avg)
@@ -223,6 +248,7 @@ def add_usage_vacuum_features(df):
     sorted_idx = df.index
     df = df.reset_index(drop=True)
     df['TEAM_AVG_STARS'] = df.groupby('TEAM_ID')['STAR_COUNT'].transform(lambda x: x.shift(1).expanding().mean())
+    assert len(df) == len(sorted_idx), "add_usage_vacuum_features: row count changed before index restore"
     df.index = sorted_idx
     df.sort_index(inplace=True)
     
@@ -276,6 +302,7 @@ def add_missing_player_context(df):
     df = df.reset_index(drop=True)
     df = df.merge(missing_usage, on=['GAME_ID', 'TEAM_ID'], how='left')
     df['MISSING_USAGE'] = df['MISSING_USAGE'].fillna(0)
+    assert len(df) == len(sorted_idx), "add_missing_player_context: row count changed before index restore"
     df.index = sorted_idx
     
     return df
@@ -285,16 +312,15 @@ def add_schedule_density(df):
     print("...Calculating Schedule Density")
     df = df.copy()
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
-    df = df.sort_values(['PLAYER_ID', 'GAME_DATE'])
-    def get_rolling_count(group):
-        temp_series = pd.Series(1, index=group['GAME_DATE'])
-        return temp_series.rolling('7D').count().values
-    games_7d_list = []
-    for player_id, group in df.groupby('PLAYER_ID'):
-        counts = get_rolling_count(group)
-        games_7d_list.extend(counts)
-    df['GAMES_7D']  = games_7d_list
-    df['GAMES_7D']  = df['GAMES_7D'].astype(float)
+    df = df.sort_values(['PLAYER_ID', 'GAME_DATE']).reset_index(drop=True)
+
+    def _count_7d(group):
+        return pd.Series(
+            pd.Series(1, index=pd.DatetimeIndex(group['GAME_DATE'])).rolling('7D').count().values,
+            index=group.index
+        )
+
+    df['GAMES_7D']  = df.groupby('PLAYER_ID', group_keys=False).apply(_count_7d).astype(float)
     df['IS_4_IN_6'] = (df['GAMES_7D'] >= 4).astype(int)
     return df
 
@@ -405,9 +431,11 @@ def add_head_to_head_stats(df):
 def add_blocks_specific_features(df):
     print("...Adding Block-Specific Features")
     df = df.copy()
-    df['OPP_RIM_ATTEMPTS'] = df.groupby(['OPPONENT', 'SEASON_ID']).apply(
-        lambda x: (x['FGA'] - x['FG3A']).shift(1).rolling(10, min_periods=5).mean()
-    ).reset_index(level=[0, 1], drop=True)
+    df['_paint'] = df['FGA'] - df['FG3A']
+    df['OPP_RIM_ATTEMPTS'] = df.groupby(['OPPONENT', 'SEASON_ID'])['_paint'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).mean()
+    )
+    df.drop(columns=['_paint'], inplace=True)
     df['OPP_RIM_ATTEMPTS'] = df['OPP_RIM_ATTEMPTS'].fillna(
         df.groupby('SEASON_ID')['FGA'].transform('median') * 0.6)
     if 'PACE_ROLLING' in df.columns:
@@ -464,6 +492,39 @@ def add_turnover_specific_features(df):
     return df
 
 
+def add_streak_consistency_features(df):
+    print("...Adding Streak & Consistency Features")
+    df = df.copy()
+    streak_stats = ['PTS', 'REB', 'AST', 'FG3M', 'FGA', 'BLK', 'STL', 'TOV',
+                    'FPTS', 'PRA', 'USAGE_RATE', 'MIN', 'GAME_SCORE']
+    for stat in streak_stats:
+        l5_col     = f'{stat}_L5'
+        l20_col    = f'{stat}_L20'
+        l5_med_col = f'{stat}_L5_Median'
+        season_col = f'{stat}_Season'
+        if l5_col in df.columns and l20_col in df.columns:
+            df[f'{stat}_STREAK'] = (df[l5_col] - df[l20_col]).fillna(0)
+        if l5_med_col in df.columns and season_col in df.columns:
+            df[f'{stat}_CONSISTENCY'] = (
+                df[l5_med_col] / (df[season_col].abs() + 0.1)
+            ).clip(0, 3).fillna(1.0)
+    return df
+
+
+def add_expected_possessions_feature(df):
+    print("...Adding Expected Possessions Feature")
+    df = df.copy()
+    if all(c in df.columns for c in ['PACE_ROLLING', 'USAGE_RATE_L5', 'MIN_Season']):
+        df['EXP_POSS'] = (
+            (df['PACE_ROLLING'] / 100) * (df['USAGE_RATE_L5'] / 100) * df['MIN_Season']
+        ).clip(0, 30)
+    if all(c in df.columns for c in ['PACE_ROLLING', 'USAGE_RATE_Season', 'MIN_Season']):
+        df['EXP_POSS_SEASON'] = (
+            (df['PACE_ROLLING'] / 100) * (df['USAGE_RATE_Season'] / 100) * df['MIN_Season']
+        ).clip(0, 30)
+    return df
+
+
 def add_rebound_specific_features(df):
     """
     ENHANCED: Advanced rebounding features to improve REB model from 72% → 78%+
@@ -479,14 +540,17 @@ def add_rebound_specific_features(df):
     df = df.copy()
     
     # ===== EXISTING FEATURES (Keep these) =====
-    df['TEAM_OREB_EMPHASIS'] = df.groupby(['TEAM_ID', 'SEASON_ID']).apply(
-        lambda x: x['OREB'].shift(1).rolling(10, min_periods=5).sum() /
-                  (x['FGA'].shift(1).rolling(10, min_periods=5).sum() + 0.1)
-    ).reset_index(level=[0, 1], drop=True).fillna(0.25)
-    
-    df['OPP_REB_WEAKNESS'] = df.groupby(['OPPONENT', 'SEASON_ID']).apply(
-        lambda x: (x['OREB'] + x['DREB']).shift(1).rolling(10, min_periods=5).mean()
-    ).reset_index(level=[0, 1], drop=True)
+    df['_oreb_roll'] = df.groupby(['TEAM_ID', 'SEASON_ID'])['OREB'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).sum())
+    df['_fga_roll'] = df.groupby(['TEAM_ID', 'SEASON_ID'])['FGA'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).sum())
+    df['TEAM_OREB_EMPHASIS'] = (df['_oreb_roll'] / (df['_fga_roll'] + 0.1)).fillna(0.25)
+    df.drop(columns=['_oreb_roll', '_fga_roll'], inplace=True)
+
+    df['_total_reb'] = df['OREB'] + df['DREB']
+    df['OPP_REB_WEAKNESS'] = df.groupby(['OPPONENT', 'SEASON_ID'])['_total_reb'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).mean())
+    df.drop(columns=['_total_reb'], inplace=True)
     df['OPP_REB_WEAKNESS'] = df['OPP_REB_WEAKNESS'].fillna(df.groupby('SEASON_ID')['REB'].transform('median'))
     
     df['MISSED_SHOTS_PROXY']  = df['FGA'] - df['FGM']
@@ -502,9 +566,10 @@ def add_rebound_specific_features(df):
     ).fillna(df['FGA'].median())
     
     # Opponent 3PT rate affects rebound distance (long rebounds harder to predict)
-    df['OPP_3PT_RATE'] = df.groupby(['OPPONENT', 'SEASON_ID']).apply(
-        lambda x: (x['FG3A'] / (x['FGA'] + 0.1)).shift(1).rolling(10, min_periods=5).mean()
-    ).reset_index(level=[0, 1], drop=True).fillna(0.35)
+    df['_3pt_rate'] = df['FG3A'] / (df['FGA'] + 0.1)
+    df['OPP_3PT_RATE'] = df.groupby(['OPPONENT', 'SEASON_ID'])['_3pt_rate'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).mean()).fillna(0.35)
+    df.drop(columns=['_3pt_rate'], inplace=True)
     
     # Total rebounding opportunities (team + opponent misses)
     if 'PACE_ROLLING' in df.columns:
@@ -709,9 +774,10 @@ def add_blocks_enhanced_features(df):
     
     # 1. OPPONENT PAINT ATTACK RATE (Critical!)
     # Teams that drive to the rim get blocked more
-    df['OPP_PAINT_SHOTS'] = df.groupby(['OPPONENT', 'SEASON_ID']).apply(
-        lambda x: ((x['FGA'] - x['FG3A']) * 0.6).shift(1).rolling(10, min_periods=5).mean()
-    ).reset_index(level=[0, 1], drop=True).fillna(25)
+    df['_paint_adj'] = (df['FGA'] - df['FG3A']) * 0.6
+    df['OPP_PAINT_SHOTS'] = df.groupby(['OPPONENT', 'SEASON_ID'])['_paint_adj'].transform(
+        lambda x: x.shift(1).rolling(10, min_periods=5).mean()).fillna(25)
+    df.drop(columns=['_paint_adj'], inplace=True)
     
     # Opponent rim attack rate
     if 'OPP_FGA_VOLUME' in df.columns:
@@ -793,7 +859,6 @@ def main():
     df = df.sort_values(['PLAYER_ID', 'GAME_DATE'])
 
     print("\n--- STAGE 3: HISTORICAL FEATURES ---")
-    print("\n--- STAGE 3: HISTORICAL FEATURES ---")
     df = add_rolling_features(df)
     df = add_home_away_performance(df)
 
@@ -802,6 +867,8 @@ def main():
     df = add_rookie_features(df)
     df = add_momentum_features(df)
     df = add_efficiency_signals(df)
+    df = add_streak_consistency_features(df)
+    df = add_expected_possessions_feature(df)
 
     print("\n--- STAGE 5: MATCHUP FEATURES ---")
     df = add_defense_vs_position(df)

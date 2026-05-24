@@ -33,13 +33,26 @@ import pandas as pd
 import time
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+_EASTERN = ZoneInfo('America/New_York')
 from src.core.utils import SimpleCache
 
 # --- CONFIGURATION ---
 CACHE_DIR = 'fanduel_cache'
 CACHE_FILE = os.path.join(CACHE_DIR, 'fanduel_cache.json')
 CACHE_DURATION_MINUTES = 30
+
+# Sharp books = better true probability estimates (lower vig, closer to market)
+SHARP_BOOKS = ['pinnacle', 'betonlineag', 'lowvig', 'circasports']
+# Soft books = where the +EV bets live
+SOFT_BOOKS = [
+    'fanduel', 'draftkings', 'betmgm', 'caesars',
+    'pointsbet_us', 'betrivers', 'unibet_us', 'espnbet',
+    'superbook', 'wynnbet', 'barstool',
+]
+ALL_BOOKS = SHARP_BOOKS + SOFT_BOOKS
 
 # Expanded Market List
 SAFE_MARKETS = [
@@ -136,7 +149,7 @@ class FanDuelClient:
                 'regions': self.regions,
                 'markets': 'h2h',
                 'oddsFormat': self.odds_format,
-                'bookmakers': 'fanduel'
+                'bookmakers': ','.join(ALL_BOOKS)
             }
 
             try:
@@ -154,8 +167,8 @@ class FanDuelClient:
                     try:
                         ct = g.get('commence_time')
                         if ct:
-                            dt_utc = datetime.strptime(ct, "%Y-%m-%dT%H:%M:%SZ")
-                            dt_est = dt_utc - timedelta(hours=5)
+                            dt_utc = datetime.strptime(ct, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                            dt_est = dt_utc.astimezone(_EASTERN)
                             if dt_est.strftime('%Y-%m-%d') == target_date:
                                 filtered_games.append(g)
                     except:
@@ -172,8 +185,8 @@ class FanDuelClient:
                 try:
                     commence_time = game.get('commence_time')
                     if commence_time:
-                        dt_utc = datetime.strptime(commence_time, "%Y-%m-%dT%H:%M:%SZ")
-                        dt_est = dt_utc - timedelta(hours=5)
+                        dt_utc = datetime.strptime(commence_time, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                        dt_est = dt_utc.astimezone(_EASTERN)
                         game_date_str = dt_est.strftime('%Y-%m-%d')
                 except:
                     game_date_str = datetime.now().strftime('%Y-%m-%d')
@@ -181,7 +194,7 @@ class FanDuelClient:
                 print(f"      [{game_date_str}] Fetching props for Game {i+1}/{len(games_to_check)}...", end='\r')
                 props = self._fetch_props_for_game(sport_key, game['id'], game_date_str)
                 all_data.extend(props)
-                time.sleep(0.5)
+                time.sleep(0.25)
             print("")
 
         if not all_data:
@@ -226,7 +239,7 @@ class FanDuelClient:
             'regions': self.regions,
             'markets': markets_string,
             'oddsFormat': self.odds_format,
-            'bookmakers': 'fanduel'
+            'bookmakers': ','.join(ALL_BOOKS)
         }
 
         try:
@@ -239,25 +252,27 @@ class FanDuelClient:
             print(f"\n      \u274c Request exception for game {game_id}: {e}")
             return []
 
-        clean_odds = []
         bookmakers = data.get('bookmakers', [])
         if not bookmakers:
-            print(f"\n      \u26a0\ufe0f  No FanDuel bookmaker data for game {game_id} (bookmakers list empty)")
+            print(f"\n      \u26a0\ufe0f  No bookmaker data for game {game_id}")
             return []
-        book = bookmakers[0]
 
-        for market in book['markets']:
-            raw_stat = market['key']
-            stat_name = LOCAL_STAT_MAP.get(raw_stat, self.stat_map.get(raw_stat, raw_stat))
-            for outcome in market['outcomes']:
-                clean_odds.append({
-                    'Player': outcome['description'],
-                    'Stat': stat_name,
-                    'Line': outcome.get('point', 0),
-                    'Odds': outcome.get('price', 0),
-                    'Side': outcome['name'],
-                    'Date': game_date
-                })
+        clean_odds = []
+        for book in bookmakers:
+            book_key = book.get('key', 'unknown')
+            for market in book.get('markets', []):
+                raw_stat = market['key']
+                stat_name = LOCAL_STAT_MAP.get(raw_stat, self.stat_map.get(raw_stat, raw_stat))
+                for outcome in market['outcomes']:
+                    clean_odds.append({
+                        'Player': outcome['description'],
+                        'Stat': stat_name,
+                        'Line': outcome.get('point', 0),
+                        'Odds': outcome.get('price', 0),
+                        'Side': outcome['name'],
+                        'Date': game_date,
+                        'Bookmaker': book_key,
+                    })
         return clean_odds
 
 

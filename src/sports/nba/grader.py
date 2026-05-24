@@ -31,6 +31,7 @@ from nba_api.stats.endpoints import playergamelogs
 
 BASE_DIR  = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 SCANS_DIR = os.path.join(BASE_DIR, 'output', 'nba', 'scans')
+PROJ_DIR  = os.path.join(BASE_DIR, 'data',   'nba', 'projections')
 
 PP_PAYOUT   = 1.0 / 1.15        # $0.87 profit per $1 wagered on a win
 BREAK_EVEN  = 1.15 / 2.15 * 100 # ~53.5%
@@ -92,6 +93,12 @@ def fetch_box_scores(date_str: str) -> dict:
 def grade_file(filename: str, player_stats: dict) -> dict:
     """Grade one scan file in-place. Returns summary dict."""
     df = pd.read_csv(filename)
+
+    # Remap AI Scanner columns (NAME/TARGET/PP/EDGE) to grader schema
+    ai_cols = {'NAME', 'TARGET', 'PP', 'EDGE'}
+    if ai_cols.issubset(df.columns) and 'Player' not in df.columns:
+        df = df.rename(columns={'NAME': 'Player', 'TARGET': 'Stat', 'PP': 'Line'})
+        df['Side'] = df['EDGE'].apply(lambda e: 'Over' if float(e) >= 0 else 'Under')
 
     required = {'Player', 'Stat', 'Line', 'Side'}
     if not required.issubset(df.columns):
@@ -181,7 +188,10 @@ def grade_single():
 
     filename = os.path.join(SCANS_DIR, f"scan_{date_str}.csv")
     if not os.path.exists(filename):
-        print(f"ERROR: {filename} not found")
+        # Fall back to AI Scanner projections directory
+        filename = os.path.join(PROJ_DIR, f"scan_{date_str}.csv")
+    if not os.path.exists(filename):
+        print(f"ERROR: scan_{date_str}.csv not found in {SCANS_DIR} or {PROJ_DIR}")
         return
 
     print(f"Fetching NBA results for {date_str}...")
@@ -198,7 +208,10 @@ def grade_single():
 
 def grade_all_ungraded():
     """Grade every scan file that has no Result column yet."""
-    files = sorted(glob.glob(os.path.join(SCANS_DIR, 'scan_20*.csv')))
+    files = sorted(set(
+        glob.glob(os.path.join(SCANS_DIR, 'scan_20*.csv')) +
+        glob.glob(os.path.join(PROJ_DIR,  'scan_20*.csv'))
+    ))
     ungraded = []
     for f in files:
         try:

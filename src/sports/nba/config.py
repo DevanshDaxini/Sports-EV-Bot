@@ -156,8 +156,9 @@ mode_descriptions = {
     'ALL':        "🎲 ALL — every stat incl. speculative (calibrated per-stat threshold)",
 }
 
-print(f"⚙️  {mode_descriptions.get(SCANNING_MODE, 'UNKNOWN MODE')}")
-print(f"   Scanning: {', '.join(ACTIVE_TARGETS)}")
+def print_mode_info():
+    print(f"⚙️  {mode_descriptions.get(SCANNING_MODE, 'UNKNOWN MODE')}")
+    print(f"   Scanning: {', '.join(ACTIVE_TARGETS)}")
 
 # 6. Injury Adjustment — Absorption Rates
 # What fraction of a missing player's production redistributes to active teammates.

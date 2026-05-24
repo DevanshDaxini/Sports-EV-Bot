@@ -36,6 +36,7 @@ import math
 import pandas as pd
 from fuzzywuzzy import process
 from src.core.config import SLIP_CONFIG
+from src.core.odds_providers.fanduel import SHARP_BOOKS
 
 class PropsAnalyzer:
     def __init__(self, prizepicks_df, fanduel_df, league='NBA'):
@@ -105,12 +106,51 @@ class PropsAnalyzer:
             'DEFAULT': 3.0
         }
 
+    def _build_consensus(self):
+        """
+        Build consensus true probability per (Player, Stat, Line) using sharp
+        books when available, falling back to all books.
+
+        Returns dict: {(player, stat, line): {'over': float, 'under': float, 'books': list}}
+        """
+        df = self.fd_df.copy()
+        if 'Bookmaker' not in df.columns:
+            df['Bookmaker'] = 'fanduel'
+
+        sharp_df = df[df['Bookmaker'].isin(SHARP_BOOKS)]
+        ref_df = sharp_df if not sharp_df.empty else df
+
+        over_df = ref_df[ref_df['Side'] == 'Over'].copy()
+        under_df = ref_df[ref_df['Side'] == 'Under'].copy()
+
+        merged = pd.merge(
+            over_df[['Player', 'Stat', 'Line', 'Odds', 'Bookmaker']],
+            under_df[['Player', 'Stat', 'Line', 'Odds', 'Bookmaker']],
+            on=['Player', 'Stat', 'Line', 'Bookmaker'],
+            suffixes=('_over', '_under')
+        )
+
+        consensus = {}
+        for (player, stat, line), group in merged.groupby(['Player', 'Stat', 'Line']):
+            over_probs, under_probs = [], []
+            for _, row in group.iterrows():
+                true_o, true_u = self._calculate_true_probability(row['Odds_over'], row['Odds_under'])
+                over_probs.append(true_o)
+                under_probs.append(true_u)
+            consensus[(player, stat, line)] = {
+                'over': sum(over_probs) / len(over_probs),
+                'under': sum(under_probs) / len(under_probs),
+                'books': group['Bookmaker'].tolist(),
+            }
+        return consensus
+
     def calculate_edges(self):
         """
-        Find profitable opportunities by comparing PrizePicks to FanDuel.
-        
-        NOW WITH LINE-ADJUSTED WIN% CALCULATION!
-        
+        Find profitable opportunities by comparing PrizePicks to consensus odds.
+
+        Uses sharp-book consensus (Pinnacle/Betonline/LowVig) as true probability
+        reference when available. Falls back to all available books.
+
         Returns:
             pandas.DataFrame: Rows with columns:
                 Date, Player, League, Stat, Line, Side, Implied_Win_%, FD_Odds, FD_Line
@@ -120,9 +160,18 @@ class PropsAnalyzer:
         if self.fd_df.empty:
             return pd.DataFrame()
 
+        # Build consensus true probabilities from sharp (or all) books
+        self._consensus = self._build_consensus()
+
         # --- STEP 1: RESHAPE FANDUEL DATA (Long -> Wide) ---
-        fd_over = self.fd_df[self.fd_df['Side'] == 'Over'].copy()
-        fd_under = self.fd_df[self.fd_df['Side'] == 'Under'].copy()
+        # Use FanDuel specifically for line reference (soft book lines for PP comparison)
+        fd_source = self.fd_df
+        if 'Bookmaker' in self.fd_df.columns:
+            fd_only = self.fd_df[self.fd_df['Bookmaker'] == 'fanduel']
+            fd_source = fd_only if not fd_only.empty else self.fd_df
+
+        fd_over = fd_source[fd_source['Side'] == 'Over'].copy()
+        fd_under = fd_source[fd_source['Side'] == 'Under'].copy()
 
         fd_over = fd_over.rename(columns={'Odds': 'over_price'})
         fd_under = fd_under.rename(columns={'Odds': 'under_price'})
@@ -183,10 +232,17 @@ class PropsAnalyzer:
             fd_over_odds = fd_row['over_price']
             fd_under_odds = fd_row['under_price']
 
-            # Get base true probability from FanDuel
-            true_over, true_under = self._calculate_true_probability(fd_over_odds, fd_under_odds)
-            
-            # ✅ NEW: Adjust for line difference
+            # Use consensus true probability when available (sharp books preferred),
+            # fall back to devigging FD odds directly
+            consensus_key = (fd_name, pp_stat, fd_line)
+            if consensus_key in self._consensus:
+                c = self._consensus[consensus_key]
+                true_over, true_under = c['over'], c['under']
+                ref_books = c['books']
+            else:
+                true_over, true_under = self._calculate_true_probability(fd_over_odds, fd_under_odds)
+                ref_books = ['fanduel']
+
             adjusted_over, adjusted_under = self._adjust_for_line_difference(
                 true_over, true_under, line_diff, pp_stat
             )
@@ -202,7 +258,8 @@ class PropsAnalyzer:
                     "Implied_Win_%": round(adjusted_over * 100, 2),
                     "FD_Odds": fd_over_odds,
                     "FD_Line": fd_line,
-                    "Line_Diff": round(line_diff, 1)  # ✅ PP - FD
+                    "Line_Diff": round(line_diff, 1),
+                    "Ref_Books": len(ref_books),
                 })
 
             if 'Under' in valid_sides:
@@ -216,7 +273,8 @@ class PropsAnalyzer:
                     "Implied_Win_%": round(adjusted_under * 100, 2),
                     "FD_Odds": fd_under_odds,
                     "FD_Line": fd_line,
-                    "Line_Diff": round(line_diff, 1)  # ✅ PP - FD
+                    "Line_Diff": round(line_diff, 1),
+                    "Ref_Books": len(ref_books),
                 })
 
         return pd.DataFrame(opportunities)
