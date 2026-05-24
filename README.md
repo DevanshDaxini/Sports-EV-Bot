@@ -86,31 +86,31 @@ sports_ev_bot/
 
 21 XGBoost + LightGBM ensemble models (60% XGBoost / 40% LightGBM). Trained on 4 seasons of game logs with exponential recency sample weights and Optuna Bayesian hyperparameter optimization.
 
-| Target  | MAE   | R²    |
-|---------|-------|-------|
-| PTS     | 4.77  | 0.461 |
-| REB     | 1.94  | 0.411 |
-| AST     | 1.43  | 0.465 |
-| FG3M    | 0.94  | 0.240 |
-| FG3A    | 1.56  | 0.514 |
-| BLK     | 0.54  | 0.164 |
-| STL     | 0.77  | 0.021 |
-| TOV     | 0.96  | 0.203 |
-| PRA     | 6.09  | 0.516 |
-| PR      | 5.62  | 0.471 |
-| PA      | 5.21  | 0.523 |
-| RA      | 2.66  | 0.429 |
-| SB      | 0.98  | 0.068 |
-| FGM     | 1.84  | 0.413 |
-| FGA     | 2.79  | 0.570 |
-| FTM     | 1.48  | 0.348 |
-| FTA     | 1.77  | 0.360 |
-| FPTS    | 7.77  | 0.459 |
-| PTS_1H  | 3.12  | 0.352 |
-| PRA_1H  | 3.84  | 0.432 |
-| FPTS_1H | 4.93  | 0.378 |
+| Target  | MAE   | R²    | Directional Accuracy |
+|---------|-------|-------|----------------------|
+| PTS     | 4.77  | 0.461 | 60.2%                |
+| REB     | 1.94  | 0.411 | 57.9%                |
+| AST     | 1.43  | 0.465 | 55.5%                |
+| FG3M    | 0.94  | 0.240 | 54.6%                |
+| FG3A    | 1.56  | 0.514 | 54.0%                |
+| BLK     | 0.54  | 0.164 | 39.7%                |
+| STL     | 0.77  | 0.021 | 61.1%                |
+| TOV     | 0.96  | 0.203 | 62.0%                |
+| PRA     | 6.09  | 0.516 | 61.1%                |
+| PR      | 5.62  | 0.471 | 60.6%                |
+| PA      | 5.21  | 0.523 | 60.5%                |
+| RA      | 2.66  | 0.429 | 58.6%                |
+| SB      | 0.98  | 0.068 | 62.4%                |
+| FGM     | 1.84  | 0.413 | 58.3%                |
+| FGA     | 2.79  | 0.570 | 60.5%                |
+| FTM     | 1.48  | 0.348 | 50.5%                |
+| FTA     | 1.77  | 0.360 | 53.1%                |
+| FPTS    | 7.77  | 0.459 | 61.4%                |
+| PTS_1H  | 3.12  | 0.352 | 58.8%                |
+| PRA_1H  | 3.84  | 0.432 | 59.9%                |
+| FPTS_1H | 4.93  | 0.378 | 61.0%                |
 
-MAE = Mean Absolute Error. R² = coefficient of determination. Metrics from held-out test set (most recent 30% of games, including 2025-26 playoffs).
+MAE = Mean Absolute Error. R² = coefficient of determination. Directional Accuracy = % of test games where model correctly predicted Over vs Under relative to the PrizePicks line. Metrics from held-out test set (most recent 30% of games, including 2025-26 playoffs).
 
 ### Key Features (451 total)
 
