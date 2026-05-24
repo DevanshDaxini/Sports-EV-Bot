@@ -39,3 +39,20 @@ data/tennis/processed/
 
 # Tennis model binaries (regenerate with train.py)
 models/tennis/*.json
+
+# LightGBM model binaries (regenerate with train.py)
+models/nba/*_lgbm.txt
+
+# Claude / RuFlo infrastructure (local dev tools, not project code)
+.claude/
+CLAUDE.md
+.mcp.json
+ruvector.db
+
+# Debug / scratch scripts
+debug_backtest.py
+scratch/
+
+# Analysis docs (generated artifacts)
+docs/ANALYSIS.md
+docs/FIXES.md
